@@ -38,6 +38,8 @@ CFG = load_config()
 
 PORT = CFG.get("port", "8080")
 MLX_HOST = f"http://127.0.0.1:{PORT}"
+IDLE_TIMEOUT_MIN = float(CFG.get("idle_timeout_minutes", "10"))
+HEARTBEAT_FILE = "/tmp/err_last_use"
 
 # ── help ────────────────────────────────────────────────────────────
 
@@ -79,8 +81,42 @@ def health_ok() -> bool:
         return False
 
 
+def touch_heartbeat() -> None:
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def spawn_idle_watchdog(server_pid: int) -> None:
+    watchdog = (
+        "import os, sys, time, signal\n"
+        f"pid={server_pid}\n"
+        f"hb={HEARTBEAT_FILE!r}\n"
+        f"timeout={IDLE_TIMEOUT_MIN}*60\n"
+        "while True:\n"
+        "    time.sleep(30)\n"
+        "    try: os.kill(pid, 0)\n"
+        "    except OSError: sys.exit(0)\n"
+        "    try: last=os.path.getmtime(hb)\n"
+        "    except OSError: last=time.time()\n"
+        "    if time.time()-last>timeout:\n"
+        "        try: os.kill(pid, signal.SIGTERM)\n"
+        "        except OSError: pass\n"
+        "        sys.exit(0)\n"
+    )
+    subprocess.Popen(
+        [sys.executable, "-c", watchdog],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def ensure_running() -> bool:
     if health_ok():
+        touch_heartbeat()
         return True
 
     print("🚀 Starting mlx-lm server...")
@@ -94,12 +130,14 @@ def ensure_running() -> bool:
         "--chat-template-args", json.dumps({"enable_thinking": False}),
     ]
 
-    subprocess.Popen(cmd, stdout=log, stderr=log)
+    proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
 
     for _ in range(60):
         time.sleep(1)
         if health_ok():
             print("✅ mlx-lm ready")
+            touch_heartbeat()
+            spawn_idle_watchdog(proc.pid)
             return True
 
     print("❌ mlx-lm server failed to start. Check /tmp/mlx_lm_server.log", file=sys.stderr)
