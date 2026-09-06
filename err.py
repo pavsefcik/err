@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""err 0.4 — explains your last shell command or answers questions using a local MLX model."""
+"""err 0.5 — explains your last shell command or answers questions using Apple Foundation Models."""
 
 import json
 import os
@@ -40,12 +40,15 @@ PORT = CFG.get("port", "8080")
 MLX_HOST = f"http://127.0.0.1:{PORT}"
 IDLE_TIMEOUT_MIN = float(CFG.get("idle_timeout_minutes", "10"))
 HEARTBEAT_FILE = "/tmp/err_last_use"
+SHELL_CONFIG_CACHE = "/tmp/err_shellconfig"
+SHELL_CONFIG_MARKER = "@@FUNCTIONS@@"
+FUNC_BODY_LIMIT = 300
 
 # ── help ────────────────────────────────────────────────────────────
 
 HELP = """\
 
-ERR 0.4 // explains the last command or answers questions using a local LLM
+ERR 0.5 // explains the last command or answers questions using Apple Foundation Models
 
 Usage:
   err                  Explain the last command
@@ -64,12 +67,12 @@ Exit codes explained:
 
 How it works:
   Run a command, then type `err`. It sends the command and exit code
-  to a local mlx-lm server and streams a short explanation.
+  to an Apple Foundation Models server and streams a short explanation.
   Optionally capture stderr: some-cmd 2>/tmp/err_stderr; err
 
 """
 
-# ── mlx-lm server management ──────────────────────────────────────
+# ── fm server management ────────────────────────────────────────
 
 
 def health_ok() -> bool:
@@ -117,17 +120,17 @@ def spawn_idle_watchdog(server_pid: int) -> None:
 def ensure_running() -> bool:
     if health_ok():
         touch_heartbeat()
+        if not os.path.isfile(SHELL_CONFIG_CACHE):
+            build_shell_config_cache()
         return True
 
-    print("🚀 Starting mlx-lm server...")
-    log = open("/tmp/mlx_lm_server.log", "w")
+    print("🚀 Starting Apple Foundation Models server...")
+    log = open("/tmp/fm_server.log", "w")
 
     cmd = [
-        "mlx_lm", "server",
-        "--model", CFG["model_id"],
+        "fm", "serve",
         "--host", "127.0.0.1",
         "--port", PORT,
-        "--chat-template-args", json.dumps({"enable_thinking": False}),
     ]
 
     proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
@@ -135,13 +138,100 @@ def ensure_running() -> bool:
     for _ in range(60):
         time.sleep(1)
         if health_ok():
-            print("✅ mlx-lm ready")
+            print("✅ fm server ready")
             touch_heartbeat()
+            build_shell_config_cache()
             spawn_idle_watchdog(proc.pid)
             return True
 
-    print("❌ mlx-lm server failed to start. Check /tmp/mlx_lm_server.log", file=sys.stderr)
+    print("❌ fm server failed to start. Check /tmp/fm_server.log", file=sys.stderr)
     return False
+
+
+# ── shell-config cache ──────────────────────────────────────────────
+# Dumped once when the fm server starts; looked up per call.
+
+
+def _strip_quotes(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+def parse_shell_config(dump: str) -> tuple[dict, dict]:
+    aliases: dict[str, str] = {}
+    functions: dict[str, str] = {}
+    if SHELL_CONFIG_MARKER in dump:
+        alias_part, _, func_part = dump.partition(SHELL_CONFIG_MARKER)
+    else:
+        alias_part, func_part = dump, ""
+
+    for line in alias_part.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name:
+            aliases[name] = _strip_quotes(value)
+
+    func_name = None
+    body: list[str] = []
+    for line in func_part.splitlines():
+        stripped = line.strip()
+        m = re.match(r"^(?:function\s+)?(\S+)\s*\(\s*\)\s*\{?\s*$", stripped)
+        if m:
+            if func_name:
+                functions[func_name] = " ".join(body)[:FUNC_BODY_LIMIT]
+            func_name = m.group(1)
+            body = []
+        elif func_name is not None:
+            body.append(stripped)
+    if func_name:
+        functions[func_name] = " ".join(body)[:FUNC_BODY_LIMIT]
+
+    return aliases, functions
+
+
+def build_shell_config_cache() -> None:
+    """Dump the shell's aliases and functions into the cache file."""
+    try:
+        dump = subprocess.run(
+            ["zsh", "-ic", f'alias; print -r -- "{SHELL_CONFIG_MARKER}"; functions'],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return
+    aliases, functions = parse_shell_config(dump)
+    try:
+        with open(SHELL_CONFIG_CACHE, "w") as f:
+            json.dump({"aliases": aliases, "functions": functions}, f)
+    except OSError:
+        pass
+
+
+def load_shell_config() -> dict:
+    try:
+        with open(SHELL_CONFIG_CACHE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def shell_defn(cmd: str) -> str:
+    first = cmd.split()[0] if cmd.split() else cmd
+    cfg = load_shell_config()
+    aliases = cfg.get("aliases", {})
+    functions = cfg.get("functions", {})
+    if first in aliases:
+        return f"alias: {aliases[first]}"
+    if first in functions:
+        return f"function: {functions[first]}"
+    return ""
 
 
 # ── LLM helpers ───────────────────────────────────────────────────
@@ -214,15 +304,26 @@ def stream_response(messages: list[dict]) -> None:
 def handle_command(cmd: str, exit_code: int, stderr_content: str) -> None:
     env = "macOS, zsh."
     if exit_code == 0:
-        context = f"{env} Command: {cmd}"
+        context = f"{env} Command (exit 0): {cmd}"
         prompt = CFG["prompt_success"]
+    elif exit_code < 0:
+        context = f"{env} Command (exit unknown): {cmd}"
+        prompt = CFG.get(
+            "prompt_unknown",
+            "If the context includes a shell-config definition for the command, state it and explain what the command does. Do not assume it failed unless there is evidence of an error.",
+        )
     else:
         context = f"{env} Command (exit {exit_code}): {cmd}"
         prompt = CFG["prompt_fail"]
         if not stderr_content:
             context += "\nNo error output available."
 
-    if stderr_content:
+    defn = shell_defn(cmd)
+    if defn:
+        first = cmd.split()[0] if cmd.split() else cmd
+        context += f"\nThe user's shell config defines '{first}' as: {defn}"
+
+    if stderr_content and exit_code > 0:
         stderr_trimmed = stderr_content.strip()[:300]
         context += f"\nStderr: {stderr_trimmed}"
 
@@ -274,6 +375,8 @@ def main() -> None:
     print()
     if exit_code == 0:
         print(f"✅ {cmd} (exit 0)")
+    elif exit_code < 0:
+        print(f"❔ {cmd} (exit unknown)")
     else:
         print(f"💥 {cmd} (exit {exit_code})")
 
@@ -282,7 +385,7 @@ def main() -> None:
 
     stderr_content = ""
     stderr_file = os.environ.get("_ERR_STDERR_FILE", "/tmp/err_stderr")
-    if os.path.isfile(stderr_file) and os.path.getsize(stderr_file) > 0:
+    if exit_code > 0 and os.path.isfile(stderr_file) and os.path.getsize(stderr_file) > 0:
         with open(stderr_file) as f:
             stderr_content = f.read()
 
