@@ -301,44 +301,65 @@ def stream_response(messages: list[dict]) -> None:
 # ── command explanation ───────────────────────────────────────────
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You explain what a shell command did on macOS zsh. Answer in one short "
+    "sentence. If the command is an alias, say which command the alias runs."
+)
+
+
 def handle_command(cmd: str, exit_code: int, stderr_content: str) -> None:
-    env = "macOS, zsh."
-    if exit_code == 0:
-        context = f"{env} Command (exit 0): {cmd}"
-        prompt = CFG["prompt_success"]
-    elif exit_code < 0:
-        context = f"{env} Command (exit unknown): {cmd}"
-        prompt = CFG.get(
-            "prompt_unknown",
-            "If the context includes a shell-config definition for the command, state it and explain what the command does. Do not assume it failed unless there is evidence of an error.",
-        )
-    else:
-        context = f"{env} Command (exit {exit_code}): {cmd}"
-        prompt = CFG["prompt_fail"]
-        if not stderr_content:
-            context += "\nNo error output available."
-
+    """Build a short, clearly labelled context and ask for one explanation."""
+    first = cmd.split()[0] if cmd.split() else cmd
     defn = shell_defn(cmd)
+
+    lines = [f"Command: {cmd}"]
     if defn:
-        first = cmd.split()[0] if cmd.split() else cmd
-        context += f"\nThe user's shell config defines '{first}' as: {defn}"
+        kind, _, expansion = defn.partition(": ")
+        lines.append(f"Shell {kind} ({first}) expands to: {expansion}")
 
-    if stderr_content and exit_code > 0:
-        stderr_trimmed = stderr_content.strip()[:300]
-        context += f"\nStderr: {stderr_trimmed}"
+    if exit_code == 0:
+        lines.append("Exit code: 0 (success)")
+    elif exit_code < 0:
+        lines.append("Exit code: unknown")
+    else:
+        lines.append(f"Exit code: {exit_code} (failure)")
 
-    messages = [{"role": "user", "content": f"{context}\n{prompt}"}]
+    if exit_code > 0:
+        if stderr_content.strip():
+            lines.append(f"Error output: {stderr_content.strip()[:300]}")
+        else:
+            lines.append("Error output: none")
+
+    lines.append("")
+    if exit_code == 0:
+        lines.append(CFG["prompt_success"])
+    elif exit_code < 0:
+        lines.append(CFG.get("prompt_unknown", ""))
+    elif exit_code == 127:
+        lines.append(CFG.get("prompt_not_found", CFG["prompt_fail"]))
+    else:
+        lines.append(CFG["prompt_fail"])
+
+    messages = [
+        {"role": "system", "content": CFG.get("system_prompt", DEFAULT_SYSTEM_PROMPT)},
+        {"role": "user", "content": "\n".join(lines)},
+    ]
     stream_response(messages)
 
 
 # ── freeform question ─────────────────────────────────────────────
 
 
-def handle_question(question: str) -> None:
-    system_prompt = "Short shell answers for macOS and zsh. Include one example command."
+DEFAULT_QUESTION_PROMPT = (
+    "You answer shell questions for macOS zsh. Reply in at most three short "
+    "sentences, then give one example command in a fenced code block. If the "
+    "answer needs no command, skip the code block."
+)
 
+
+def handle_question(question: str) -> None:
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": CFG.get("question_system_prompt", DEFAULT_QUESTION_PROMPT)},
         {"role": "user", "content": question},
     ]
 
