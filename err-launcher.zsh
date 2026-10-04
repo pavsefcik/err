@@ -62,7 +62,7 @@ err() {
     fi
 
     if [[ -z "$last_cmd" ]]; then
-      print "No command to explain." >&2
+      print "🤔 No command to explain." >&2
       return 1
     fi
 

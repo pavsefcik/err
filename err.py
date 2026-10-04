@@ -138,7 +138,7 @@ def ensure_running() -> bool:
     for _ in range(60):
         time.sleep(1)
         if health_ok():
-            print("✅ fm server ready")
+            print("🟢 fm server ready")
             touch_heartbeat()
             build_shell_config_cache()
             spawn_idle_watchdog(proc.pid)
@@ -262,8 +262,11 @@ def stream_response(messages: list[dict]) -> None:
     )
 
     collected = []
+    started = False
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
+            print("💡 ", end="", flush=True)
+            started = True
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data: "):
@@ -285,17 +288,19 @@ def stream_response(messages: list[dict]) -> None:
         cleaned = strip_thinking(full)
         if cleaned != full:
             # reprint cleaned version
-            print(f"\r\033[K{cleaned}", end="")
-        print("\n")
+            print(f"\r\033[K💡 {cleaned}", end="")
+        print()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         try:
             err_msg = json.loads(body).get("error", body)
         except json.JSONDecodeError:
             err_msg = body
-        print(f"\n❌ Server error ({e.code}): {err_msg}", file=sys.stderr)
+        nl = "\n" if started else ""
+        print(f"{nl}❌ Server error ({e.code}): {err_msg}", file=sys.stderr)
     except urllib.error.URLError as e:
-        print(f"\n❌ Connection failed: {e.reason}", file=sys.stderr)
+        nl = "\n" if started else ""
+        print(f"{nl}❌ Connection failed: {e.reason}", file=sys.stderr)
 
 
 # ── command explanation ───────────────────────────────────────────
@@ -377,7 +382,6 @@ def main() -> None:
     # freeform question mode: err <question...>
     if len(sys.argv) >= 2:
         question = " ".join(sys.argv[1:])
-        print()
         if not ensure_running():
             sys.exit(1)
         handle_question(question)
@@ -388,12 +392,11 @@ def main() -> None:
     exit_code_str = os.environ.get("_ERR_LAST_EXIT", "0")
 
     if not cmd:
-        print("No command recorded yet.", file=sys.stderr)
+        print("🤔 No command recorded yet.", file=sys.stderr)
         sys.exit(1)
 
     exit_code = int(exit_code_str)
 
-    print()
     if exit_code == 0:
         print(f"✅ {cmd} (exit 0)")
     elif exit_code < 0:
