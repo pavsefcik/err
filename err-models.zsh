@@ -229,8 +229,8 @@ CFG
       _err_pause
       return 1
     fi
-    if [[ ! -f "$_ERR_SRC_DIR/lib/err__repl.py" ]]; then
-      gum style --foreground 196 "chat REPL missing ($_ERR_SRC_DIR/lib/err__repl.py) — re-run install.sh or /err-setup."
+    if [[ ! -f "$_ERR_SRC_DIR/lib/err_repl.py" ]]; then
+      gum style --foreground 196 "chat REPL missing ($_ERR_SRC_DIR/lib/err_repl.py) — re-run install.sh or /err-setup."
       _err_pause
       return 1
     fi
@@ -316,9 +316,9 @@ CFG
          ERR_PROCTITLE="$model" PYTHONPATH="$libprefix" \
            uvx --from setproctitle --quiet python3 -c 'import setproctitle' >/dev/null 2>&1; then
         ERR_PROCTITLE="$model" PYTHONPATH="$libprefix" \
-          uvx --from setproctitle --quiet python3 "$_ERR_SRC_DIR/lib/err__repl.py" "${repl_args[@]}"
+          uvx --from setproctitle --quiet python3 "$_ERR_SRC_DIR/lib/err_repl.py" "${repl_args[@]}"
       else
-        python3 "$_ERR_SRC_DIR/lib/err__repl.py" "${repl_args[@]}"
+        python3 "$_ERR_SRC_DIR/lib/err_repl.py" "${repl_args[@]}"
       fi
       rc=$?
       if (( rc != 3 )); then
@@ -338,7 +338,7 @@ CFG
 
   _err_apply_quick() {
     # Thinking is per-model-family and applied at launch / per request (see
-    # _err_apply_launch_thinking and lib/err__repl.py), so it is NOT written
+    # _err_apply_launch_thinking and lib/err_repl.py), so it is NOT written
     # into ERR_SERVER_FLAGS here — that would be a second source of truth.
     if [[ -n "$ERR_QUICK_TEMP" ]]; then
       _err_replace_or_append ERR_CHAT_FLAGS --temperature "$ERR_QUICK_TEMP"
@@ -680,7 +680,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     _err_export_apc_env "$state_dir"
     # ERR_PROCTITLE + PYTHONPATH make the server rename itself to the model
     # name in Activity Monitor / ps (see lib/sitecustomize.py), and let a
-    # compatible MoE load lib/err__moe from this checkout.
+    # compatible MoE load lib/err_moe from this checkout.
     _err_build_server_argv "$model" "$port" "$hub_dir" "${launch_flags[@]}"
     ERR_PROCTITLE="$model" PYTHONPATH="$_ERR_SRC_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" \
       "${reply[@]}" >"$log" 2>&1 &
@@ -2040,11 +2040,103 @@ PY
     return 1
   }
 
+  # ── headless model pickers (gum) ──────────────────────────────────
+  # Every management verb falls back to one of these when it is called with no
+  # model id, so `err run` / `err switch` / `err download` are menus, and
+  # `err run <id>` still works verbatim for scripts and the pi extension.
+  typeset -gA _ERR_PICK_MAP=()
+
+  _err_default_model() {   # the model `err run`/`chat` should prefer
+    local f="$state_dir/default-model" m
+    [[ -r "$f" ]] || return 1
+    m="$(<"$f")"
+    m="${m//[[:space:]]/}"
+    [[ -n "$m" ]] && print -r -- "$m"
+  }
+
+  _err_last_model() {      # last model that served on :11500
+    local f="$state_dir/last-model" m
+    [[ -r "$f" ]] || return 1
+    m="$(<"$f")"
+    m="${m//[[:space:]]/}"
+    [[ -n "$m" ]] && print -r -- "$m"
+  }
+
+  _err_note_last_model() { [[ -n "${1:-}" ]] && print -r -- "$1" > "$state_dir/last-model" }
+
+  # Run the gum chooser over stdin and map the label back to a model id.
+  _err_pick() {
+    local header="$1" choice
+    choice=$(gum choose --header "$header" --height 20) || return 1
+    [[ -z "$choice" ]] && return 1
+    [[ -n "${_ERR_PICK_MAP[$choice]:-}" ]] && print -r -- "${_ERR_PICK_MAP[$choice]}"
+  }
+
+  # Installed models, the configured default pinned to the top with a star.
+  _err_pick_installed() {
+    local header="${1:-Pick a model}" def
+    def=$(_err_default_model)
+    local -a ids=( ${(f)"$(_err_headless_list)"} )
+    ids=( ${ids:#} )
+    if (( ! ${#ids} )); then
+      gum style --foreground 244 "No models installed yet."
+      return 1
+    fi
+    _ERR_PICK_MAP=()
+    local -a lines=()
+    local id
+    if [[ -n "$def" && " ${ids[*]} " == *" $def "* ]]; then
+      lines+=( "★ $def" )
+      _ERR_PICK_MAP["★ $def"]="$def"
+    fi
+    for id in "${ids[@]}"; do
+      [[ "$id" == "$def" ]] && continue
+      lines+=( "  $id" )
+      _ERR_PICK_MAP["  $id"]="$id"
+    done
+    printf '%s\n' "${lines[@]}" | _err_pick "$header  (★ = default)"
+  }
+
+  # Curated catalog rows this Mac can host, labelled by title.
+  _err_pick_catalog() {
+    local header="${1:-Pick a model to download}"
+    local ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+    _ERR_PICK_MAP=()
+    local -a lines=()
+    local tier tname title ids tags desc firstid label
+    while IFS=$'\x1f' read -r tier tname title ids tags desc; do
+      [[ -z "$ids" ]] && continue
+      firstid="${ids%% & *}"
+      label="$title  —  $firstid  [$tname]"
+      lines+=( "$label" )
+      _ERR_PICK_MAP["$label"]="$firstid"
+    done < <(_err_catalog_rows_for_ram "$ram_gb" "$curated_file")
+    if (( ! ${#lines} )); then
+      gum style --foreground 244 "No curated models for this Mac."
+      return 1
+    fi
+    printf '%s\n' "${lines[@]}" | _err_pick "$header"
+  }
+
+  # With no model id: keep the default/last one if it is installed, else ask.
+  _err_pick_default_first() {
+    local header="$1" m
+    for m in $(_err_default_model) $(_err_last_model); do
+      [[ -n "$m" ]] && _err_model_supported "$m" "$hub_dir" && { print -r -- "$m"; return 0 }
+    done
+    _err_pick_installed "$header"
+  }
+
   _err_headless_run() {
-    local model="$1"
+    local model="${1:-}"
     if [[ -z "$model" ]]; then
-      print -u2 "usage: err run <model-id>, e.g. err run mlx-community/Qwen3-8B"
-      return 2
+      if ! model=$(_err_pick_installed "Start which model on :11500?"); then
+        if model=$(_err_pick_catalog "Nothing installed — download and start:"); then
+          _err_headless_download "$model" || return 1
+        else
+          return 1
+        fi
+      fi
     fi
     # Fetch uncached weights before choosing a backend: the streaming-MoE
     # compatibility check reads the cached config.json, so a fresh model has to
@@ -2063,6 +2155,7 @@ PY
       read -r pid port cur <<< "$(_err_running_model)"
       if [[ "$cur" == "$model" ]]; then
         print "err: $model already running on :$port (pid $pid)"
+        _err_note_last_model "$model"
         return 0
       fi
       print "err: stopping $cur (pid $pid) to switch to $model"
@@ -2074,14 +2167,17 @@ PY
       done
     fi
     _err_headless_launch "$model"
-    return $?
+    local rc=$?
+    (( rc == 0 )) && _err_note_last_model "$model"
+    return $rc
   }
 
   _err_headless_stop() {
     local want="${1:-}"
-    # err stop            -> the model on :11500
+    # err stop            -> every err server (11500–11509); the common case
     # err stop <model>    -> that model, wherever it runs
-    # err stop --all      -> every err server on :11500–:11509
+    # err stop --all      -> same as bare `err stop`
+    [[ -z "$want" ]] && want="--all"
     if [[ "$want" == "--all" ]]; then
       local n=0 pid port model
       while IFS=$'\t' read -r pid port model; do
@@ -2111,6 +2207,95 @@ PY
     fi
     print "err: nothing running on :11500"
     return 0
+  }
+
+  # err switch [model] — stop whatever serves :11500 and start another.
+  _err_headless_switch() {
+    local model="${1:-}"
+    if [[ -z "$model" ]]; then
+      model=$(_err_pick_installed "Switch to which model?") || return 1
+    fi
+    _err_headless_run "$model"
+  }
+
+  # err default [model] — remember the model `err run` / `err chat` prefer.
+  _err_headless_default() {
+    local model="${1:-}"
+    if [[ -z "$model" ]]; then
+      model=$(_err_pick_installed "Set which model as default?") || return 1
+    fi
+    if ! _err_model_supported "$model" "$hub_dir"; then
+      print -u2 "err: $model can't be served — pick an MLX-quantized repo"
+      return 1
+    fi
+    print -r -- "$model" > "$state_dir/default-model"
+    print "err: default model = $model"
+    print "  ★ marks it in the menus; bare 'err run' starts it on :11500"
+  }
+
+  # err remove [model]... — delete weights from disk. Never touches config.
+  _err_headless_remove() {
+    local -a want=( "$@" )
+    if (( ! ${#want} )); then
+      local -a ids=( ${(f)"$(_err_headless_list)"} )
+      ids=( ${ids:#} )
+      if (( ! ${#ids} )); then print "err: nothing installed"; return 0; fi
+      local picked
+      picked=$(printf '%s\n' "${ids[@]}" | gum choose --no-limit \
+        --header "Delete which model(s)?  (space = mark, enter = confirm)") || return 1
+      [[ -z "$picked" ]] && return 1
+      want=( ${(f)picked} )
+    fi
+    print "err: this deletes weights from $hub_dir"
+    printf '  %s\n' "${want[@]}"
+    gum confirm "Delete ${#want} model(s) permanently?" || { print "aborted"; return 1; }
+    local model folder rc=0
+    for model in "${want[@]}"; do
+      folder="$hub_dir/models--${model//\//--}"
+      if [[ -d "$folder" ]]; then
+        rm -rf "$folder" && print "  ✓ removed $model"
+        _err_purge_orphan_blobs "$hub_dir" 2>/dev/null
+      else
+        print -u2 "  err: not installed: $model"
+        rc=1
+      fi
+    done
+    return $rc
+  }
+
+  # err settings — the same gum menus the TUI uses, without the TUI.
+  _err_headless_settings() {
+    local pick
+    pick=$(printf "Basic settings\nAdvanced settings (edit config.zsh)" \
+      | gum choose --header "err settings") || return 1
+    case "$pick" in
+      Basic*)    _err_basic_settings_menu ;;
+      Advanced*) _err_advanced_settings_menu ;;
+    esac
+  }
+
+  # err uninstall — stop servers, unwire ~/.zshrc, report what is left behind.
+  _err_headless_uninstall() {
+    print "This stops err's servers and removes its line from ~/.zshrc."
+    print "Models, config and logs are NOT deleted (see 'err cache')."
+    gum confirm "Uninstall err?" || { print "aborted"; return 1; }
+    local pid port model
+    while IFS=$'\t' read -r pid port model; do
+      [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && print "  ✓ stopped $model (:$port)"
+    done < <(_err_running)
+    local rc="$HOME/.zshrc" tmp
+    if [[ -r "$rc" ]] && grep -q 'err-launcher.zsh' "$rc" 2>/dev/null; then
+      tmp=$(mktemp)
+      grep -v 'err-launcher.zsh' "$rc" > "$tmp"
+      mv "$tmp" "$rc"
+      print "  ✓ removed the launcher line from $rc"
+    else
+      print "  · no launcher line found in $rc"
+    fi
+    print ""
+    print "Done. To remove the code itself:"
+    print "  rm -rf \"$_ERR_SRC_DIR\""
+    print "Open a new terminal afterwards."
   }
 
   _err_headless_status() {
@@ -2173,11 +2358,11 @@ PY
   }
 
   _err_headless_info() {
-    local model="$1" json=0
-    [[ "$2" == "--json" ]] && json=1
+    local model="${1:-}" json=0
+    [[ "${2:-}" == "--json" ]] && json=1
     if [[ -z "$model" ]]; then
-      print -u2 "usage: err info <model-id> [--json]"
-      return 2
+      (( json )) && { print -u2 "usage: err info <model-id> [--json]"; return 2; }
+      model=$(_err_pick_installed "Details for which model?") || return 1
     fi
     local folder="$hub_dir/models--${model//\//--}"
     local family spec control markers rf size_kb=0
@@ -2232,11 +2417,17 @@ PY
   # Download one or more models. Reuses the same loader the TUI download menu
   # uses, so caching/verification behavior stays identical.
   _err_headless_download() {
-    if (( $# == 0 )); then
-      print -u2 "usage: err download <model-id>..."
-      return 2
+    local -a want=( "$@" )
+    if (( ! ${#want} )); then
+      local picked
+      if picked=$(_err_pick_catalog "Download which model(s)?"); then
+        want=( "$picked" )
+      else
+        return 1
+      fi
     fi
     local model rc=0
+    set -- "${want[@]}"
     for model in "$@"; do
       print -u2 "err: downloading $model …"
       if _err_snapshot_download "$model"; then
@@ -2339,10 +2530,9 @@ PY
   # Foreground launch + chat REPL. The server is session-tracked, so it is
   # stopped when the REPL exits (unlike `run`, which detaches for agents).
   _err_headless_chat() {
-    local model="$1"
+    local model="${1:-}"
     if [[ -z "$model" ]]; then
-      print -u2 "usage: err chat <model-id>"
-      return 2
+      model=$(_err_pick_default_first "Chat with which model?") || return 1
     fi
     local pid port cur
     if [[ -n "$(_err_running_model)" ]]; then
@@ -2364,6 +2554,10 @@ PY
     return $?
   }
 
+  # `err tui` / `err menu` is the no-verb path (the TUI); the launcher already
+  # routes it that way, this keeps a bare `zsh err-models.zsh tui` working too.
+  [[ "${1:-}" == (tui|menu) ]] && shift
+
   # ---- CLI (non-interactive) mode -------------------------------
   # ``err <sub> [args]`` runs and exits without the TUI. Servers started by
   # `run` are DETACHED — they must survive this shell exiting (the pi
@@ -2378,6 +2572,11 @@ PY
     case "$_sub" in
       run|serve)  _err_headless_run      "$@" ;;
       chat)       _err_headless_chat     "$@" ;;
+      switch)     _err_headless_switch   "$@" ;;
+      default|set-default) _err_headless_default "$@" ;;
+      remove|rm)  _err_headless_remove   "$@" ;;
+      settings|config) _err_headless_settings "$@" ;;
+      uninstall)  _err_headless_uninstall "$@" ;;
       stop)       _err_headless_stop     "$@" ;;
       status)     _err_headless_status   "$@" ;;
       list|ls)    _err_headless_list     "$@" ;;

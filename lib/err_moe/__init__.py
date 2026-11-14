@@ -3,7 +3,7 @@
 This is err's built-in MoE engine: the shared core stays resident while the
 routed experts are read from the original safetensors checkpoint on demand and
 kept in a bounded RAM cache. It is used only for checkpoints that are compatible
-with the engine (see :func:`err__moe.engine.load_engine`); every other model
+with the engine (see :func:`err_moe.engine.load_engine`); every other model
 keeps using ``mlx_vlm.server``.
 """
 

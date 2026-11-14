@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from .engine import Engine, EngineConfig, load_engine, resolve_model_path, stream
 
-logger = logging.getLogger("err__moe")
+logger = logging.getLogger("err_moe")
 
 
 class ChatMessage(BaseModel):
@@ -187,7 +187,7 @@ def build_app(engine: Engine, model_name: str) -> FastAPI:
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(prog="err__moe.server")
+    parser = argparse.ArgumentParser(prog="err_moe.server")
     parser.add_argument("--model", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)

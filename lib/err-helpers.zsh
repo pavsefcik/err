@@ -197,19 +197,24 @@ _err_usage() {
 err — local MLX model manager + OpenAI-compatible server on :11500
 
 Usage:
-  err                        interactive TUI (browse / run / download)
-  err run <model>            start a model on :11500 (detached) and wait
-  err chat <model>           start a model and open the built-in chat REPL
-  err stop [<model>|--all]   stop a running model (default: the one on :11500)
+  err tui                    interactive TUI (browse / run / download)
+  err run [<model>]          start a model on :11500 (detached); no arg = menu
+  err chat [<model>]         chat with the default/last model, or pick one
+  err switch [<model>]       stop :11500 and start another model
+  err default [<model>]      set the model `run`/`chat` prefer
+  err stop [<model>|--all]   stop a running model (default: all)
   err status [--json]        show what is running
   err list [--json] [--all]  list installed models mlx-vlm can serve
-  err download <model>...    download model(s) from the HuggingFace Hub
+  err download [<model>]...  download model(s); no arg = curated menu
+  err remove [<model>]...    delete model(s) from the disk
   err curated [--json]       show the full curated model catalog (all tiers)
-  err info <model> [--json]  show details for a model (size, family, thinking)
+  err info [<model>] [--json]  size, family, thinking knobs
+  err settings               basic and advanced model settings
   err cache [--json]         show on-disk footprint (APC, logs, hub, tool env)
   err clean --apc|--logs|--venvs|--all [--dry-run] [--force]
                                   delete regenerable caches (never model weights)
   err endpoint [--json]      print the base URL / model of the running server
+  err uninstall              stop servers and unwire ~/.zshrc
   err version | -v           print the err version
   err help | -h | --help     show this help
 
@@ -616,7 +621,7 @@ _err_model_supported() {
 # Whether err's streaming routed-expert engine can serve this model.
 # Compatible = MLX affine-quantized checkpoint whose router-selected experts live
 # in switch_mlp tensors we can read from the original safetensors shards. Only
-# such models are launched through lib/err__moe; everything else keeps using
+# such models are launched through lib/err_moe; everything else keeps using
 # mlx_vlm.server. $1 = model id, $2 = HF hub dir.
 _err_moe_compatible() {
   local model="$1" hub_dir="$2" snap snapdir cfg index
@@ -705,7 +710,7 @@ _err_build_server_argv() {
     local py cache_gb
     py="$(_err_mlx_python)" || return 1
     cache_gb="${ERR_MOE_CACHE_GB:-6}"
-    reply=( "$py" -m err__moe.server --model "$model" --port "$port" \
+    reply=( "$py" -m err_moe.server --model "$model" --port "$port" \
       --cache-gb "$cache_gb" "${server_flags[@]}" )
   else
     reply=( mlx_vlm.server --model "$model" --port "$port" "${server_flags[@]}" )
