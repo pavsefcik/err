@@ -1,5 +1,7 @@
 # err
 
+To err is human.
+
 Explains your last shell command using Apple Foundation Models. After running a failed command type `err` to get a short explanation of what happened. You can also type `err <question>` to ask a shell or CLI question directly, or `errc <cmd...>` to run a command with stderr captured and get an explanation automatically.
 
 **Requirements:** macOS 27 with the Apple Foundation Models CLI (`fm`, preinstalled)
