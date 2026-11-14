@@ -2224,6 +2224,10 @@ PY
     if [[ -z "$model" ]]; then
       model=$(_err_pick_installed "Set which model as default?") || return 1
     fi
+    if [[ ! -d "$hub_dir/models--${model//\//--}" ]]; then
+      print -u2 "err: $model isn't downloaded yet — err download $model"
+      return 1
+    fi
     if ! _err_model_supported "$model" "$hub_dir"; then
       print -u2 "err: $model can't be served — pick an MLX-quantized repo"
       return 1
