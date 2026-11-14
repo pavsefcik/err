@@ -56,6 +56,11 @@ it. `errc` is **not** `noglob`-aliased (it runs real commands).
 | `_ERR_SESSION_ID` | uuid, one per shell, minted by the launcher |
 | `_ERR_SUGGEST_FILE` | err.py writes the recommended command here (or nothing) |
 | `_ERR_TOKENS_FILE` | err.py writes cumulative session token count here |
+| `_ERR_SESSION_ID_FILE` | err.py writes the *new* id here after `new` / `resume N` (a child cannot mutate the shell), one line; the launcher reads it back |
+
+Test/CI overrides (never needed interactively): `ERR_BACKEND`, `ERR_BASE_URL`,
+`ERR_SUGGEST` override the matching `err.conf` values so `tests/test_err.py` can
+point at a mock server with no `fm` and no network.
 
 The launcher reads `_ERR_SUGGEST_FILE` after the call: if it holds one
 non-empty line under 400 bytes, it does `print -z` on it. `_ERR_TOKENS_FILE`

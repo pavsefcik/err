@@ -1,0 +1,34 @@
+# Changelog
+
+All notable changes to err are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/).
+
+## [0.601.0]
+
+err and marv-mlx are now one tool.
+
+### Merged
+
+- **The model manager.** `err` now carries the full marv-mlx engine: run,
+  switch, default, stop, list, curated, download, remove, settings, info,
+  cache, clean, endpoint, the TUI, and the built-in chat.
+- **Local MLX models behind an OpenAI-compatible endpoint.** `err run <model>`
+  serves on `http://127.0.0.1:11500/v1`, so any OpenAI client works with no API
+  key.
+- **The explain / ask layer.** `err`, `err <question>`, `errc <cmd...>` and the
+  session verbs (`new`, `clear`, `resume`, `delete`) keep working on Apple
+  Foundation Models, on-device by default.
+- **One install path.** `install.sh` installs `uv`, `gum` and `mlx-vlm` without
+  Xcode CLT, Homebrew or Rust, then wires the launcher into `~/.zshrc` once.
+- **Shared state.** `ERR_STATE_DIR` keeps the marv-mlx default
+  (`~/.cache/marv/mlx`), so existing config, chats, logs and model downloads
+  carry over unchanged.
+
+### Deliberately not merged
+
+- **The marv harness.** The coding-agent loop, tools and TUI stay in
+  [marv](https://github.com/pavsefcik/marv); err is not that harness.
+- **The pi extension.** The marv-mlx pi package and its `/marv-mlx-*` commands
+  are not part of err.
+- **The chat-history TUI.** err keeps sessions for the explain/ask layer and
+  per-model chat logs, but not marv-mlx's browsable chat-history manager.

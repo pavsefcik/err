@@ -1,9 +1,123 @@
 # err
 
-Explains your last shell command using Apple Foundation Models. After running a failed command type `err` to get a short explanation of what happened. You can also type `err <question>` to ask a shell or CLI question directly, or `errc <cmd...>` to run a command with stderr captured and get an explanation automatically.
+Corrects and explains your last shell command, and runs local MLX models on Apple Silicon — on-device by default, no API key, no cloud.
 
-**Requirements:** macOS 27 with the Apple Foundation Models CLI (`fm`, preinstalled)
+## Requirements
 
-**Install:** double-click `install.command` (or run it from a terminal). It adds a line to your `~/.zshrc` to source `err-launcher.zsh`.
+- An Apple Silicon Mac (M-series) on macOS 26 or later.
+- For the explain / ask half: Apple Foundation Models, i.e. the `fm` CLI that ships with macOS 27 or later. Without `fm`, err still downloads, runs and serves models — only `err` / `err <question>` are unavailable.
+- Network for the first install and for model downloads; models run offline once cached.
+- No Xcode Command Line Tools, no Homebrew, no compiler required.
 
-The model is configured in `err.conf` (`system` = on-device Apple Foundation Model by default, or `pcc` for Private Cloud Compute). On first run, `fm serve` starts in the background and stays running for subsequent calls.
+## Install
+
+From an err checkout:
+
+```sh
+sh install.sh
+```
+
+The installer is idempotent and safe to re-run. It treats the source directory as the install directory (the launcher, engine and config stay together) and:
+
+1. preflights Apple Silicon and macOS 26+;
+2. warns — but does not abort — when `fm` is missing;
+3. installs `uv` (Astral's standalone installer) and `gum` (sha256-checked GitHub release binary) only if missing;
+4. runs `uv tool install mlx-vlm --with jinja2` only if `mlx_vlm.server` is missing;
+5. adds the uv/gum bin directories to `PATH` in `~/.zshrc` and sources `err-launcher.zsh` there — each line appended at most once, and printed before it is written.
+
+Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.command` only wires the launcher; `install.sh` is the full install.
+
+## Commands
+
+```
+err v0.601.0 // in-terminal LLM & local MLX model runner
+
+  err                        correct/explain the last command
+  err <question>             ask a command-related or any other question
+  err new                    start a fresh session (old one stays resumable)
+  err clear | -c             clear the current session, keep the id
+  err resume                 resume a previous session
+  err delete                 delete all sessions
+  err status                 show what is running
+  err chat <model>           start a model and open the built-in interactive chat
+  err switch <model>         switch to another model
+  err default <model>        set model as default
+  err run <model>            start a model on port 11500
+  err stop <model>           stop a running model (default: all)
+  err tui                    interactive TUI (browse / run / download)
+  err list                   list installed models err can serve
+  err curated                show the full curated model catalog
+  err download <model>       download model(s) from the HuggingFace Hub
+  err remove <model>         delete model(s) from the disk
+  err settings               basic and advanced model settings
+  err info <model>           show details for a model (size, family, thinking)
+  err cache                  show on-disk footprint (APC, logs, hub, tool env)
+  err clean                  delete regenerable caches (never model weights)
+  err uninstall              remove err from your system
+  err endpoint               print the base URL / model of the running server
+  err version | -v           show the current version
+  err help | -h              show this help
+```
+
+## Explain & ask
+
+After any command, type `err` to get a short explanation of what it did (and a corrected command when it failed). `err <question>` asks a shell or general question; `err new`, `err clear`, `err resume` and `err delete` manage the conversation history that keeps follow-ups in context.
+
+`errc <cmd...>` is the shortcut for the failure case: it runs the command with stderr captured, then calls `err` on it. Use it when you know a command might blow up and you want the explanation immediately:
+
+```sh
+errc make build
+errc git push origin main
+```
+
+The explain layer is configured in `err.conf` (prompts, temperature, backend): `backend = fm` uses the on-device Apple Foundation Model (the default), `backend = pcc` uses Private Cloud Compute, and `backend = mlx` points it at the local model server on `:11500`.
+
+**err never executes a command a model suggests.** It prints the suggestion into your prompt buffer — press Enter yourself if you want to run it.
+
+### Quoting
+
+`err` is a normal shell function, not a `noglob` alias, so your shell parses the question first. An unquoted `?` now works, but quote the argument when it contains any of `' " ( ) ; | & < > !`:
+
+```sh
+err "what does 'set -e' do?"
+err 'why did (my subshell) exit 1?'
+```
+
+`errc` is never `noglob`-aliased — it runs real commands.
+
+## Models
+
+err owns the full local-model lifecycle:
+
+- `err tui` — interactive menu to browse, run and download models.
+- `err list` / `err curated` — what is installed, and the curated catalog for every RAM tier.
+- `err download <model>` / `err remove <model>` — fetch from the HuggingFace Hub, or delete from disk.
+- `err chat <model>` — start a model and open the built-in interactive chat.
+- `err switch <model>` / `err default <model>` — change the active model, or the one used by default.
+- `err run <model>` / `err stop <model>` — start and stop a server (stop defaults to every running model).
+- `err status` / `err endpoint` — what is running and where to reach it.
+- `err settings` — basic and advanced launch settings.
+- `err info <model>` — size, family and thinking capability for a model.
+- `err cache` / `err clean` — report the on-disk footprint and delete regenerable caches (never model weights).
+- `err uninstall` — remove err from the system.
+
+State lives in `ERR_STATE_DIR`, which defaults to `~/.cache/marv/mlx` (inherited from marv-mlx so existing config, chats and logs keep working). It holds `config.zsh`, `sessions/`, `chats/`, logs and cached catalogs; model weights stay in the HuggingFace hub cache.
+
+## Use from any app
+
+`err run <model>` starts the model behind an OpenAI-compatible endpoint on port `11500`:
+
+```sh
+err run mlx-community/Qwen3.5-4B-MLX-4bit
+err endpoint   # prints the base URL and model
+```
+
+Any OpenAI client works against it — no API key:
+
+```sh
+curl -s http://127.0.0.1:11500/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mlx-community/Qwen3.5-4B-MLX-4bit","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Point your editor, agent or script at `http://127.0.0.1:11500/v1` with the running model's HuggingFace id as the model name.

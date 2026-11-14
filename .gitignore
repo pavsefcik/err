@@ -2,3 +2,4 @@
 .venv/
 __pycache__/
 *.pyc
+lib/err_moe/__pycache__/
