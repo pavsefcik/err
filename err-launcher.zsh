@@ -171,8 +171,20 @@ _err_last_exit=0
 _err_skip_exit=0     # set while err itself runs, so its $? can't clobber ours
 _err_consumed=0      # set once explained, so a second `err` doesn't repeat it
 
+# Is this command line one of ours? `err` is aliased to `noglob err`, so the
+# line preexec sees carries that prefix — matching only "err" would let an err
+# call overwrite the last real command with itself.
+_err_is_ours() {
+  local c="$1"
+  c="${c#noglob }"
+  [[ "$c" == (err|errc|err\ *|errc\ *) ]]
+}
+
 _err_preexec() {
-  [[ "$1" == "err" || "$1" == err\ * || "$1" == "errc" || "$1" == errc\ * ]] && return
+  # $1 is empty when zsh runs the hook outside an interactive command line
+  # (scripts, some plugin managers) — never let that wipe the real record.
+  [[ -z "${1:-}" ]] && return
+  _err_is_ours "$1" && return
   _err_last_cmd="$1"
   _err_consumed=0
 }
@@ -187,9 +199,14 @@ _err_precmd() {
 }
 
 if [[ -n "${ZSH_VERSION:-}" ]]; then
+  # `typeset -ga` first: under `setopt nounset` (or a caller's `set -u`) an
+  # unset hook array would abort the source and leave err undefined.
+  typeset -ga preexec_functions precmd_functions
   # Guard against duplicate hooks when the launcher is re-sourced.
   (( ${preexec_functions[(I)_err_preexec]} )) || preexec_functions+=(_err_preexec)
-  (( ${precmd_functions[(I)_err_precmd]} ))   || precmd_functions=(_err_precmd "${precmd_functions[@]}")
+  if (( ! ${precmd_functions[(I)_err_precmd]} )); then
+    precmd_functions=(_err_precmd ${precmd_functions[@]})
+  fi
 elif [[ -n "${BASH_VERSION:-}" ]]; then
   trap 'if [[ "$BASH_COMMAND" != "err" ]]; then _err_last_cmd="$BASH_COMMAND"; _err_consumed=0; fi' DEBUG
   PROMPT_COMMAND="_err_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
@@ -244,8 +261,9 @@ err() {
         last_cmd="${last_cmd#"${last_cmd%%[^[:space:]]*}"}"
         last_cmd="${last_cmd%"${last_cmd##*[^[:space:]]}"}"
         case "$last_cmd" in
-          err|err\ *|errc|errc\ *) (( h++ )) ;;
-          *) break ;;
+          *)
+            if _err_is_ours "$last_cmd"; then (( h++ )); else break; fi
+            ;;
         esac
       done
       last_exit=-1
