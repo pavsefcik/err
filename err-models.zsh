@@ -2147,19 +2147,17 @@ PY
   # command. Cancelling is not an error: esc must abort silently, not fall
   # through to another menu.
   _err_pick() {
-    local header="$1" choice rc errf
-    errf=$(mktemp)
-    choice=$(gum choose --header $'\n'"$header" --header.foreground 255 --height 20 2>"$errf")
-    rc=$?
-    if (( rc != 0 )) || [[ -z "$choice" ]]; then
-      # gum says "nothing selected" on esc; that is not worth showing.
-      if [[ -s "$errf" ]] && ! grep -qi 'nothing selected' "$errf" 2>/dev/null; then
-        cat "$errf" >&2
-      fi
-      rm -f "$errf"
+    local header="$1" choice
+    # Do NOT redirect gum's stderr: bubbletea renders the whole menu there and
+    # only the chosen line goes to stdout, so `2>file` makes `err run` look like
+    # it does nothing. Command substitution already isolates stdout.
+    choice=$(gum choose --header $'\n'"$header" --header.foreground 255 --height 20)
+    if (( $? != 0 )) || [[ -z "$choice" ]]; then
+      # gum prints its own "nothing selected" line after restoring the screen;
+      # wipe it so esc looks like a plain cancel.
+      print -n $'\e[1A\e[2K\r'
       return 1
     fi
-    rm -f "$errf"
     [[ -n "${_ERR_PICK_MAP[$choice]:-}" ]] && print -r -- "${_ERR_PICK_MAP[$choice]}"
   }
 
