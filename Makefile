@@ -2,9 +2,9 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
 
-.PHONY: test test-shell test-py lint install clean-pyc
+.PHONY: test test-shell test-py test-smoke test-menu lint install clean-pyc
 
-test: test-shell test-py
+test: test-shell test-py test-menu test-smoke
 
 # Dispatch, hooks, noglob guard — stubs both engines, no network, no models.
 test-shell:
@@ -15,6 +15,16 @@ test-shell:
 test-py:
 	@echo "== err.py =="
 	@python3 tests/test_err.py
+
+# Menus: the real picker code driven by a fake gum (rows, star, cancel, choice).
+test-menu:
+	@echo "== menus =="
+	@zsh tests/menu.zsh
+
+# End to end: real launcher + err.py + engine dispatch, isolated state/conf.
+test-smoke:
+	@echo "== smoke =="
+	@zsh tests/smoke.zsh
 
 lint:
 	@zsh -n err-launcher.zsh && echo "err-launcher.zsh ok"

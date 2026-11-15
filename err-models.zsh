@@ -18,7 +18,7 @@ source "$_ERR_SRC_DIR/lib/err-helpers.zsh"
 
 _err_engine() {
   local ERR_DEBUG=false
-  local hub_dir=~/.cache/huggingface/hub
+  local hub_dir="${ERR_HUB_DIR:-$HOME/.cache/huggingface/hub}"
   local state_dir="${ERR_STATE_DIR:-$HOME/.cache/err}"
   local log_dir="$state_dir/logs"
   local config_file="$state_dir/config.zsh"
@@ -2122,8 +2122,8 @@ PY
     if [[ -r "$f" ]]; then
       m="$(<"$f")"; m="${m//[[:space:]]/}"
     fi
-    if [[ -z "$m" && -r "$_ERR_SRC_DIR/err.conf" ]]; then
-      b=$(grep -E '^[[:space:]]*backend[[:space:]]*=' "$_ERR_SRC_DIR/err.conf" 2>/dev/null \
+    if [[ -z "$m" && -r "$(_err_conf_path)" ]]; then
+      b=$(grep -E '^[[:space:]]*backend[[:space:]]*=' "$(_err_conf_path)" 2>/dev/null \
         | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
       [[ "$b" == (fm|pcc) ]] && m="$_ERR_FM_ID"
     fi
@@ -2145,8 +2145,12 @@ PY
   # Rewrite one `key = value` line in err.conf, leaving every other line
   # untouched. This is how `err switch`/`err default` reach the explain layer:
   # err.conf -> backend is what err.py actually reads.
+  # Tests and multi-profile setups can point the whole stack at another file.
+  _err_conf_path() { print -r -- "${ERR_CONF:-$_ERR_SRC_DIR/err.conf}" }
+
   _err_conf_set() {
-    local key="$1" value="$2" f="$_ERR_SRC_DIR/err.conf" tmp
+    local key="$1" value="$2" f tmp
+    f=$(_err_conf_path)
     [[ -r "$f" ]] || return 1
     tmp=$(mktemp)
     awk -v k="$key" -v v="$value" '
@@ -2172,7 +2176,8 @@ PY
   }
 
   _err_conf_get() {
-    local key="$1" f="$_ERR_SRC_DIR/err.conf"
+    local key="$1" f
+    f=$(_err_conf_path)
     [[ -r "$f" ]] || return 1
     # ${key} braces matter: `$key[...]` is an array subscript in zsh, not a
     # regex — it fails with "bad output format specification".
@@ -2241,12 +2246,12 @@ PY
     local -a lines=()
     if [[ -n "$def" && " ${all[*]} " == *" $def "* ]]; then
       mark="* "; label="$mark$(_err_row_label "$def")"
-      lines+=( "$label" ); _ERR_PICK_MAP["$label"]="$def"
+      lines+=( "$label" ); _ERR_PICK_MAP[$label]="$def"
     fi
     for id in "${all[@]}"; do
       [[ "$id" == "$def" ]] && continue
       mark="  "; label="$mark$(_err_row_label "$id")"
-      lines+=( "$label" ); _ERR_PICK_MAP["$label"]="$id"
+      lines+=( "$label" ); _ERR_PICK_MAP[$label]="$id"
     done
     printf '%s\n' "${lines[@]}" | _err_pick "$header  (* = default)"
   }
@@ -2260,13 +2265,14 @@ PY
     local tier tname title ids tags desc firstid label
     # Always available, needs no download.
     lines+=( "  $(_err_row_label "$_ERR_FM_ID")" )
-    _ERR_PICK_MAP["  $(_err_row_label "$_ERR_FM_ID")"]="$_ERR_FM_ID"
+    label="  $(_err_row_label "$_ERR_FM_ID")"
+    _ERR_PICK_MAP[$label]="$_ERR_FM_ID"
     while IFS=$'\x1f' read -r tier tname title ids tags desc; do
       [[ -z "$ids" ]] && continue
       firstid="${ids%% & *}"
       label="$title  —  $firstid  [$tname]"
       lines+=( "$label" )
-      _ERR_PICK_MAP["$label"]="$firstid"
+      _ERR_PICK_MAP[$label]="$firstid"
     done < <(_err_catalog_rows_for_ram "$ram_gb" "$curated_file")
     if (( ! ${#lines} )); then
       gum style --foreground 244 "No curated models for this Mac."
@@ -2506,11 +2512,17 @@ PY
     if [[ -z "$model" ]]; then
       model=$(_err_pick_installed "Set which model as default?") || return 1
     fi
-    if [[ "$model" != "$_ERR_FM_ID" && ! -d "$hub_dir/models--${model//\//--}" ]]; then
+    # A remote/other OpenAI-compatible server (mlx_model / ERR_MLX_MODEL) has
+    # its own weights; only the local :11500 server needs them on this disk.
+    local remote=""
+    remote="$(_err_conf_get mlx_model)${ERR_MLX_MODEL:-}"
+    if [[ "$model" != "$_ERR_FM_ID" && -z "$remote" \
+          && ! -d "$hub_dir/models--${model//\//--}" ]]; then
       print -u2 "err: $model isn't downloaded yet — err download $model"
       return 1
     fi
-    if [[ "$model" != "$_ERR_FM_ID" ]] && ! _err_model_supported "$model" "$hub_dir"; then
+    if [[ "$model" != "$_ERR_FM_ID" && -z "$remote" ]] \
+       && ! _err_model_supported "$model" "$hub_dir"; then
       print -u2 "err: $model can't be served — pick an MLX-quantized repo"
       return 1
     fi
@@ -2559,6 +2571,157 @@ PY
       Basic*)    _err_basic_settings_menu ;;
       Advanced*) _err_advanced_settings_menu ;;
     esac
+  }
+
+  # err doctor — one pass/fail line per subsystem. The point is to convert
+  # "it doesn't work" into a named failing part, so nobody has to guess whether
+  # the backend, the launcher, the server or the config is at fault.
+  _err_headless_doctor() {
+    local problems=0 warnings=0
+    local row() {  # $1 status(ok|warn|fail), $2 name, $3 detail, $4 fix
+      printf '  %-5s %-18s %s\n' "$1" "$2" "$3"
+      [[ -n "${4:-}" ]] && printf '        %-18s fix: %s\n' "" "$4"
+    }
+
+    # 1. err.conf
+    local conf; conf=$(_err_conf_path)
+    if [[ -r "$conf" ]]; then
+      local be sug auto
+      be=$(_err_effective_backend)
+      sug=$(_err_conf_get suggest); sug=${sug:-history}
+      auto=$(_err_conf_get mlx_autostart); auto=${auto:-on}
+      case "$sug" in
+        history|ask|off) row ok conf "backend=$be suggest=$sug autostart=$auto" ;;
+        *) row fail conf "unknown suggest=$sug" "set suggest = history|ask|off" ;;
+      esac
+      [[ -n "${ERR_BACKEND:-}" ]] && {
+        row warn conf "ERR_BACKEND=$ERR_BACKEND overrides the file" "unset ERR_BACKEND"
+        (( warnings++ ))
+      }
+    else
+      row fail conf "not readable: $conf" "re-run install.sh"
+      (( problems++ ))
+    fi
+
+    # 2. explain layer
+    if command -v python3 >/dev/null 2>&1; then
+      local pv; pv=$(python3 -V 2>&1 | awk '{print $2}')
+      if python3 -c "import sys; sys.path.insert(0, '$_ERR_SRC_DIR'); import err" 2>/dev/null; then
+        row ok python "python3 $pv, err.py imports"
+      else
+        row fail python "python3 $pv, err.py fails to import" "python3 -c 'import err' in $_ERR_SRC_DIR"
+        (( problems++ ))
+      fi
+    else
+      row fail python "python3 not found" "install the CLT or python.org python"
+      (( problems++ ))
+    fi
+
+    # 3. launcher freshness (the shell that called us exported its load time)
+    local lt="${_ERR_LOADED_AT:-}" mt
+    mt=$(/usr/bin/stat -f %m "$_ERR_SRC_DIR/err-launcher.zsh" 2>/dev/null)
+    if [[ -n "$lt" && -n "$mt" ]] && (( mt > lt )); then
+      row warn launcher "changed on disk after this shell loaded it" "reload"
+      (( warnings++ ))
+    else
+      row ok launcher "current in this shell"
+    fi
+
+    # 4. state
+    if [[ -w "$state_dir" ]]; then
+      local ns; ns=$(ls -1 "$state_dir/sessions" 2>/dev/null | wc -l | tr -d ' ')
+      row ok state "$state_dir (${ns} session(s))"
+    else
+      row fail state "not writable: $state_dir" "chmod u+w $state_dir"
+      (( problems++ ))
+    fi
+    local def; def=$(_err_default_model)
+    if [[ -z "$def" ]]; then
+      row warn default "no default model chosen" "err default"
+      (( warnings++ ))
+    elif [[ "$def" == "$_ERR_FM_ID" ]]; then
+      row ok default "apple-fm (on-device)"
+    elif [[ -n "$(_err_conf_get mlx_model)${ERR_MLX_MODEL:-}" ]]; then
+      row ok default "$def (remote server)"
+    elif [[ -d "$hub_dir/models--${def//\//--}" ]]; then
+      row ok default "$def (downloaded)"
+    else
+      row fail default "$def is not on disk" "err download $def"
+      (( problems++ ))
+    fi
+
+    # 5. the backend's server
+    case "$(_err_effective_backend)" in
+      mlx*)
+        local base; base=$(_err_conf_get mlx_base_url); base=${base:-http://127.0.0.1:11500}
+        if curl -fs -o /dev/null --max-time 2 "$base/v1/models" 2>/dev/null; then
+          local mid; mid=$(cat "$state_dir/last-model" 2>/dev/null | tr -d '[:space:]')
+          row ok mlx-server "$base reachable (${mid:-model unknown})"
+        else
+          local auto; auto=$(_err_conf_get mlx_autostart); auto=${auto:-on}
+          if [[ "$auto" == on ]]; then
+            row warn mlx-server "$base not reachable — will autostart on next ask"
+            (( warnings++ ))
+          else
+            row fail mlx-server "$base not reachable" "err run <model>"
+            (( problems++ ))
+          fi
+        fi
+        ;;
+      *)
+        local fmp; fmp=$(_err_fm_port)
+        if _err_fm_running >/dev/null; then
+          row ok fm-server ":$fmp reachable"
+        elif command -v fm >/dev/null 2>&1; then
+          row warn fm-server ":$fmp not running — starts on next ask" ""
+          (( warnings++ ))
+        else
+          row fail fm-server "the fm CLI is missing (needs macOS 26+)" "or set backend = mlx"
+          (( problems++ ))
+        fi
+        ;;
+    esac
+
+    # 6. tools the model manager needs
+    local -a missing=(); local t
+    for t in gum uv uvx mlx_vlm.server; do
+      command -v "$t" >/dev/null 2>&1 || missing+=( "$t" )
+    done
+    if (( ${#missing} )); then
+      row warn tools "missing: ${missing[*]}" "re-run install.sh"
+      (( warnings++ ))
+    else
+      row ok tools "gum, uv, uvx, mlx_vlm.server"
+    fi
+
+    # 7. disk
+    local apc_kb cap_gb total_gb
+    apc_kb=$(du -sk "$state_dir/apc" 2>/dev/null | awk '{print $1}'); apc_kb=${apc_kb:-0}
+    cap_gb="${ERR_APC_TOTAL_GB:-6}"
+    total_gb=$(( apc_kb / 1024 / 1024 ))
+    if (( total_gb > cap_gb )); then
+      row warn disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)" "err clean --apc"
+      (( warnings++ ))
+    else
+      row ok disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)"
+    fi
+
+    # 8. leftovers from crashed invocations
+    local stale; stale=$(ls -1 "$state_dir"/run/*(N) 2>/dev/null | wc -l | tr -d ' ')
+    if (( stale > 50 )); then
+      row warn temp "$stale scratch files in $state_dir/run" "rm -f $state_dir/run/*"
+      (( warnings++ ))
+    else
+      row ok temp "no scratch-file buildup"
+    fi
+
+    print ""
+    if (( problems )); then
+      print "err doctor: $problems problem(s), $warnings warning(s)"
+      return 1
+    fi
+    print "err doctor: healthy ($warnings warning(s))"
+    return 0
   }
 
   # err uninstall — stop servers, unwire ~/.zshrc, report what is left behind.
@@ -2906,6 +3069,7 @@ PY
       remove|rm)  _err_headless_remove   "$@" ;;
       settings|config) _err_headless_settings "$@" ;;
       uninstall)  _err_headless_uninstall "$@" ;;
+      doctor)     _err_headless_doctor    "$@" ;;
       stop)       _err_headless_stop     "$@" ;;
       status)     _err_headless_status   "$@" ;;
       list|ls)    _err_headless_list     "$@" ;;

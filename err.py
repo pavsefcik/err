@@ -21,7 +21,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def load_config() -> dict:
     cfg = {}
-    conf_path = os.path.join(SCRIPT_DIR, "err.conf")
+    conf_path = os.environ.get("ERR_CONF") or os.path.join(SCRIPT_DIR, "err.conf")
     if not os.path.isfile(conf_path):
         print(f"❌ Config not found: {conf_path}", file=sys.stderr)
         sys.exit(1)

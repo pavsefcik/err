@@ -52,6 +52,29 @@ _ERR_STDERR_FILE="${_ERR_RUN_DIR}/stderr.$$"
 : > "$_ERR_TOKENS_FILE"
 rm -f "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" 2>/dev/null
 
+# Scratch files are named after the owning shell's pid. Reap the ones whose
+# shell is gone — nothing else ever deletes them, and a laptop that opens a few
+# terminals a day would otherwise accumulate thousands.
+_err_reap_scratch() {
+  local f pid
+  for f in "$_ERR_RUN_DIR"/*(N); do
+    pid="${f##*.}"
+    [[ "$pid" == <-> ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    kill -0 "$pid" 2>/dev/null || rm -f "$f" 2>/dev/null
+  done
+}
+_err_reap_scratch
+
+# Remove this shell's own scratch files on exit (zshexit hook, not a custom
+# `zshexit` function, so a user override is never clobbered).
+_err_cleanup_scratch() {
+  rm -f "$_ERR_SESSION_FILE" "$_ERR_TOKENS_FILE" "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" 2>/dev/null
+}
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+  autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook zshexit _err_cleanup_scratch
+fi
+
 # Turn / token facts for RPROMPT. Updated after every err call, so the prompt
 # costs no fork (a per-prompt command substitution would).
 typeset -g _ERR_TURNS=0
@@ -64,6 +87,7 @@ typeset -g _ERR_RPROMPT_OWNED=0
 # EPOCHSECONDS comes from zsh/datetime and is unset under `zsh -f`, so fall
 # back to date(1) rather than 0 (which would flag every shell as stale).
 typeset -g _ERR_LOADED_AT="${_ERR_LOADED_AT:-${EPOCHSECONDS:-$(date +%s)}}"
+export _ERR_LOADED_AT
 
 _err_version() {
   print -r -- "$(<"$_ERR_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
@@ -120,6 +144,7 @@ TO ERR IS HUMAN.
   err clean                  delete regenerable caches (never model weights)
   err uninstall              remove err from your system
   err endpoint               print the base URL / model of the running server
+  err doctor                 check the install: config, backends, server, disk
   err version | -v           show the current version
   err help | -h              show this help (this is also what bare `err` does)
 
@@ -136,7 +161,7 @@ USAGE
 # ── engine bridge ─────────────────────────────────────────────────────
 
 # Verbs served by the ported marv-mlx engine.
-_err_engine_verbs=(chat switch swap default run runs stop status tui list ls curated
+_err_engine_verbs=(chat switch swap default run runs stop status doctor tui list ls curated
   download remove settings info cache clean uninstall endpoint)
 
 _err_engine() {
@@ -188,9 +213,9 @@ _err_py() {
 #   ask                drop straight into the prompt buffer (print -z)
 #   off                don't offer the command at all
 _err_suggest_mode() {
-  local v=""
-  [[ -r "$_ERR_DIR/err.conf" ]] && v=$(grep -E '^[[:space:]]*suggest[[:space:]]*=' \
-    "$_ERR_DIR/err.conf" 2>/dev/null | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
+  local v="" conf="${ERR_CONF:-$_ERR_DIR/err.conf}"
+  [[ -r "$conf" ]] && v=$(grep -E '^[[:space:]]*suggest[[:space:]]*=' \
+    "$conf" 2>/dev/null | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
   print -r -- "${v:-history}"
 }
 
