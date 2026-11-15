@@ -2046,6 +2046,68 @@ PY
   # `err run <id>` still works verbatim for scripts and the pi extension.
   typeset -gA _ERR_PICK_MAP=()
 
+  # The on-device Apple model is a backend, not an MLX repo: it is served by
+  # `fm serve` on its own port (err.conf `port`, default 8080) and needs no
+  # download. It appears in the same menus as a sentinel id so `err run`,
+  # `err switch` and `err default` all understand it.
+  typeset -g _ERR_FM_ID="apple-fm"
+
+  _err_fm_port() {
+    local f="$_ERR_SRC_DIR/err.conf" p=""
+    [[ -r "$f" ]] && p=$(grep -E '^[[:space:]]*port[[:space:]]*=' "$f" 2>/dev/null \
+      | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -dc '0-9')
+    print -r -- "${p:-8080}"
+  }
+
+  # pid of the fm server, but only if the listener really is `fm` (not some
+  # unrelated service that happens to own the port).
+  _err_fm_running() {
+    local port=$(_err_fm_port) pid cmd
+    pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+    [[ -n "$pid" ]] || return 1
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+    # match on the executable's basename: /usr/bin/fm, /usr/local/bin/fm, …
+    [[ "${${cmd%% *}:t}" == fm ]] || return 1
+    print -r -- "$pid"
+  }
+
+  _err_fm_start() {
+    local pid port; port=$(_err_fm_port)
+    if pid=$(_err_fm_running); then
+      print "err: Apple Foundation Model already serving on :$port (pid $pid)"
+      _err_note_last_model "$_ERR_FM_ID"
+      return 0
+    fi
+    if ! command -v fm >/dev/null 2>&1; then
+      print -u2 "err: the Foundation Models CLI (fm) is missing — it ships with macOS 26+"
+      return 1
+    fi
+    local log="$log_dir/fm-$port.log"
+    print "err: starting the Apple Foundation Model on :$port…"
+    nohup fm serve --host 127.0.0.1 --port "$port" >"$log" 2>&1 &!
+    local i
+    for i in {1..120}; do
+      if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
+        print "err: ready $_ERR_FM_ID on :$port"
+        print "  endpoint: http://127.0.0.1:$port/v1"
+        _err_note_last_model "$_ERR_FM_ID"
+        return 0
+      fi
+      sleep 0.5
+    done
+    print -u2 "err: fm did not answer on :$port — log: $log"
+    return 1
+  }
+
+  _err_fm_stop() {
+    local pid port; port=$(_err_fm_port)
+    if pid=$(_err_fm_running); then
+      kill "$pid" 2>/dev/null && print "err: stopped the Apple Foundation Model (:$port)"
+      return 0
+    fi
+    return 1
+  }
+
   _err_default_model() {   # the model `err run`/`chat` should prefer
     local f="$state_dir/default-model" m
     [[ -r "$f" ]] || return 1
@@ -2064,6 +2126,8 @@ PY
 
   _err_note_last_model() { [[ -n "${1:-}" ]] && print -r -- "$1" > "$state_dir/last-model" }
 
+  _ERR_FM_LABEL="apple-fm  (Apple on-device)"
+
   # Run the gum chooser over stdin and map the label back to a model id.
   _err_pick() {
     local header="$1" choice
@@ -2072,29 +2136,34 @@ PY
     [[ -n "${_ERR_PICK_MAP[$choice]:-}" ]] && print -r -- "${_ERR_PICK_MAP[$choice]}"
   }
 
-  # Installed models, the configured default pinned to the top with a star.
+  # Human label for a selectable row. The Apple model gets a description; HF
+  # repos are already readable. Both markers below are two columns wide, so the
+  # rows line up under gum's cursor column (★ and friends are double-width and
+  # visibly shift the list).
+  _err_row_label() {
+    if [[ "$1" == "$_ERR_FM_ID" ]]; then print -r -- "$_ERR_FM_LABEL"
+    else print -r -- "$1"; fi
+  }
+
+  # Installed models plus the on-device Apple model, default pinned to the top.
   _err_pick_installed() {
-    local header="${1:-Pick a model}" def
+    local header="${1:-Pick a model}" def id mark label
     def=$(_err_default_model)
     local -a ids=( ${(f)"$(_err_headless_list)"} )
     ids=( ${ids:#} )
-    if (( ! ${#ids} )); then
-      gum style --foreground 244 "No models installed yet."
-      return 1
-    fi
+    local -a all=( "$_ERR_FM_ID" "${ids[@]}" )
     _ERR_PICK_MAP=()
     local -a lines=()
-    local id
-    if [[ -n "$def" && " ${ids[*]} " == *" $def "* ]]; then
-      lines+=( "★ $def" )
-      _ERR_PICK_MAP["★ $def"]="$def"
+    if [[ -n "$def" && " ${all[*]} " == *" $def "* ]]; then
+      mark="* "; label="$mark$(_err_row_label "$def")"
+      lines+=( "$label" ); _ERR_PICK_MAP["$label"]="$def"
     fi
-    for id in "${ids[@]}"; do
+    for id in "${all[@]}"; do
       [[ "$id" == "$def" ]] && continue
-      lines+=( "  $id" )
-      _ERR_PICK_MAP["  $id"]="$id"
+      mark="  "; label="$mark$(_err_row_label "$id")"
+      lines+=( "$label" ); _ERR_PICK_MAP["$label"]="$id"
     done
-    printf '%s\n' "${lines[@]}" | _err_pick "$header  (★ = default)"
+    printf '%s\n' "${lines[@]}" | _err_pick "$header  (* = default)"
   }
 
   # Curated catalog rows this Mac can host, labelled by title.
@@ -2104,6 +2173,9 @@ PY
     _ERR_PICK_MAP=()
     local -a lines=()
     local tier tname title ids tags desc firstid label
+    # Always available, needs no download.
+    lines+=( "  $(_err_row_label "$_ERR_FM_ID")" )
+    _ERR_PICK_MAP["  $(_err_row_label "$_ERR_FM_ID")"]="$_ERR_FM_ID"
     while IFS=$'\x1f' read -r tier tname title ids tags desc; do
       [[ -z "$ids" ]] && continue
       firstid="${ids%% & *}"
@@ -2122,13 +2194,19 @@ PY
   _err_pick_default_first() {
     local header="$1" m
     for m in $(_err_default_model) $(_err_last_model); do
-      [[ -n "$m" ]] && _err_model_supported "$m" "$hub_dir" && { print -r -- "$m"; return 0 }
+      [[ -z "$m" ]] && continue
+      [[ "$m" == "$_ERR_FM_ID" ]] && { print -r -- "$m"; return 0 }
+      _err_model_supported "$m" "$hub_dir" && { print -r -- "$m"; return 0 }
     done
     _err_pick_installed "$header"
   }
 
   _err_headless_run() {
     local model="${1:-}"
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      _err_fm_start
+      return $?
+    fi
     if [[ -z "$model" ]]; then
       if ! model=$(_err_pick_installed "Start which model on :11500?"); then
         if model=$(_err_pick_catalog "Nothing installed — download and start:"); then
@@ -2178,7 +2256,12 @@ PY
     # err stop <model>    -> that model, wherever it runs
     # err stop --all      -> same as bare `err stop`
     [[ -z "$want" ]] && want="--all"
+    if [[ "$want" == "$_ERR_FM_ID" ]]; then
+      _err_fm_stop || print "err: Apple Foundation Model is not running"
+      return 0
+    fi
     if [[ "$want" == "--all" ]]; then
+      _err_fm_stop >/dev/null 2>&1
       local n=0 pid port model
       while IFS=$'\t' read -r pid port model; do
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && { print "err: stopped $model (:$port)"; (( n++ )); }
@@ -2224,17 +2307,17 @@ PY
     if [[ -z "$model" ]]; then
       model=$(_err_pick_installed "Set which model as default?") || return 1
     fi
-    if [[ ! -d "$hub_dir/models--${model//\//--}" ]]; then
+    if [[ "$model" != "$_ERR_FM_ID" && ! -d "$hub_dir/models--${model//\//--}" ]]; then
       print -u2 "err: $model isn't downloaded yet — err download $model"
       return 1
     fi
-    if ! _err_model_supported "$model" "$hub_dir"; then
+    if [[ "$model" != "$_ERR_FM_ID" ]] && ! _err_model_supported "$model" "$hub_dir"; then
       print -u2 "err: $model can't be served — pick an MLX-quantized repo"
       return 1
     fi
     print -r -- "$model" > "$state_dir/default-model"
     print "err: default model = $model"
-    print "  ★ marks it in the menus; bare 'err run' starts it on :11500"
+    print "  * marks it in the menus (err run / err switch / err chat)"
   }
 
   # err remove [model]... — delete weights from disk. Never touches config.
@@ -2303,12 +2386,20 @@ PY
   }
 
   _err_headless_status() {
-    local json=0
-    [[ "$1" == "--json" ]] && json=1
+    local json=0 any=0 fmpid fmport
+    [[ "${1:-}" == "--json" ]] && json=1
+    if (( ! json )); then
+      fmport=$(_err_fm_port)
+      if fmpid=$(_err_fm_running); then
+        printf '%s\t:%s\tpid %s  (Apple on-device)\n' "$_ERR_FM_ID" "$fmport" "$fmpid"
+        any=1
+      fi
+    fi
     if [[ -n "$(_err_running_model)" ]]; then
       local pid port cur
       read -r pid port cur <<< "$(_err_running_model)"
       if (( json )); then
+        # Unchanged shape: pi and other clients parse exactly this.
         printf '{"model":"%s","port":%s,"pid":%s,"base_url":"http://127.0.0.1:%s/v1"}\n' \
           "$(_err_json_escape "$cur")" "$port" "$pid" "$port"
       else
@@ -2316,7 +2407,8 @@ PY
       fi
       return 0
     fi
-    if (( json )); then print 'null'; else print "none"; fi
+    if (( json )); then print 'null'; else (( any )) || print "none"; fi
+    (( any )) && return 0
     return 1
   }
 
@@ -2537,6 +2629,12 @@ PY
     local model="${1:-}"
     if [[ -z "$model" ]]; then
       model=$(_err_pick_default_first "Chat with which model?") || return 1
+    fi
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      local fmport; fmport=$(_err_fm_port)
+      _err_fm_start || return 1
+      _err_chat_repl "$_ERR_FM_ID" "$fmport"
+      return $?
     fi
     local pid port cur
     if [[ -n "$(_err_running_model)" ]]; then

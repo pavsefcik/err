@@ -66,6 +66,15 @@ The launcher reads `_ERR_SUGGEST_FILE` after the call: if it holds one
 non-empty line under 400 bytes, it does `print -z` on it. `_ERR_TOKENS_FILE`
 feeds `RPROMPT`.
 
+## The on-device model is a selectable row
+
+`apple-fm` is a sentinel id, not an HF repo: it is served by `fm serve` on
+`err.conf` → `port` (default 8080) instead of `:11500`, and needs no download.
+It is offered by `_err_pick_installed`, `_err_pick_catalog` and
+`_err_pick_default_first`, and handled explicitly by `run`, `switch`, `default`,
+`chat`, `stop` and `status`. `err list` stays HF-only (machine-readable) and
+`err endpoint` keeps reporting `:11500` for OpenAI clients.
+
 ## err.conf keys
 
 Existing keys stay. Added:

@@ -7,6 +7,13 @@ All notable changes to err are documented here. Format follows
 
 err and marv-mlx are now one tool.
 
+### Fixed
+
+- The `foreign sitecustomize.py …` line no longer prints on every command
+  (it was never actionable; `ERR_DEBUG=1` brings it back).
+- Menu rows line up: the default marker is ASCII `*`, not a double-width `★`,
+  which shifted every row under it.
+
 ### Merged
 
 - **The model manager.** `err` now carries the full marv-mlx engine: run,
@@ -15,6 +22,10 @@ err and marv-mlx are now one tool.
 - **Local MLX models behind an OpenAI-compatible endpoint.** `err run <model>`
   serves on `http://127.0.0.1:11500/v1`, so any OpenAI client works with no API
   key.
+- **`apple-fm` in the model menus.** The on-device Apple Foundation Model is a
+  first-class choice in `err run` / `err switch` / `err default` / `err chat`,
+  served by `fm serve` on its own port (`err.conf` → `port`, default `8080`).
+  `err status` reports it; `err stop apple-fm` stops it.
 - **The explain / ask layer.** `err`, `err <question>`, `errc <cmd...>` and the
   session verbs (`new`, `clear`, `resume`, `delete`) keep working on Apple
   Foundation Models, on-device by default.

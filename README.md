@@ -101,6 +101,23 @@ err owns the full local-model lifecycle:
 - `err cache` / `err clean` — report the on-disk footprint and delete regenerable caches (never model weights).
 - `err uninstall` — remove err from the system.
 
+### The Apple model is a model choice too
+
+The on-device Apple Foundation Model appears in the same menus as `apple-fm`,
+marked as the default with a leading `*`:
+
+```
+err run          # * apple-fm (Apple on-device) is one of the choices
+err default      # ... including "make the Apple model the default"
+err stop apple-fm
+```
+
+It is not an MLX repo and needs no download — selecting it starts `fm serve` on
+its own port (`err.conf` → `port`, default `8080`) instead of `:11500`, and
+`err status` reports it alongside any MLX server. `err endpoint` keeps pointing
+at `:11500` because that is the port OpenAI clients and the pi extension expect;
+for the Apple model the base URL is `http://127.0.0.1:8080/v1`.
+
 State lives in `ERR_STATE_DIR`, which defaults to `~/.cache/marv/mlx` (inherited from marv-mlx so existing config, chats and logs keep working). It holds `config.zsh`, `sessions/`, `chats/`, logs and cached catalogs; model weights stay in the HuggingFace hub cache.
 
 ## Use from any app

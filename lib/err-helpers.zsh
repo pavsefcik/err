@@ -840,7 +840,13 @@ _err_install_apc_sitecustomize() {
     [[ -d "$sp" ]] || continue
     if [[ -f "$sp/sitecustomize.py" ]] \
        && ! grep -q "$marker" "$sp/sitecustomize.py" 2>/dev/null; then
-      print -u2 "err: foreign sitecustomize.py in $sp — not touching it (APC defaults not installed)"
+      # Someone else owns that env. Staying silent is deliberate: this runs on
+      # every err invocation and the user cannot act on it. `err cache` shows
+      # the same fact under a label; ERR_DEBUG=1 brings the line back.
+      # NB: the engine declares `local ERR_DEBUG=false`, so test for a truthy
+      # value, not for "is set".
+      [[ "${ERR_DEBUG:-0}" != (0|false|"") ]] && \
+        print -u2 "err: foreign sitecustomize.py in $sp — not touching it (APC defaults not installed)"
       continue
     fi
     if ! cmp -s "$src" "$sp/sitecustomize.py" 2>/dev/null; then
