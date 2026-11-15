@@ -33,6 +33,9 @@ err and marv-mlx are now one tool.
   and only when the word stands alone — `err why did that fail` is still a
   question. `errc` is unaffected: it calls the explainer directly.
 - The help screen carries the tagline: *TO ERR IS HUMAN.*
+- Asking a question with `backend = mlx` and nothing on `:11500` now starts the
+  selected model (the engine's new hidden `ensure` verb) instead of failing.
+  Opt out with `mlx_autostart = off` / `ERR_MLX_AUTOSTART=off`.
 - `err runs [<model>]` starts an **additional** server on the next free port
   from `:11501`–`:11509`, leaving whatever serves `:11500` untouched (for
   comparing two models, or serving one to another app while err keeps its own).

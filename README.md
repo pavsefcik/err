@@ -76,6 +76,14 @@ The explain layer is configured in `err.conf` (prompts, temperature, backend): `
 
 **err never executes a command a model suggests.** With the default setting (`suggest = history` in `err.conf`) the suggestion is appended to your shell history: press **↑** to recall it, read it, edit it, then Enter — or never. `suggest = ask` drops it into the prompt buffer instead, `suggest = off` stops offering commands.
 
+### Autostart
+
+With `backend = mlx`, a question you ask when nothing is serving `:11500` starts
+the selected model instead of failing — the first one after a reboot can
+therefore take a minute while the weights load. Turn it off with
+`mlx_autostart = off` in `err.conf` (or `ERR_MLX_AUTOSTART=off`), and err will
+print how to start a model instead.
+
 ### Quoting
 
 `err` is a normal shell function, not a `noglob` alias, so your shell parses the question first. An unquoted `?` now works, but quote the argument when it contains any of `' " ( ) ; | & < > !`:

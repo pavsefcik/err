@@ -235,10 +235,13 @@ def main():
         # machine where loading 6 GB of weights is not wanted).
         saved_env = {k: os.environ.get(k) for k in
                      ("ERR_STATE_DIR", "ERR_MLX_MODEL", "ERR_BASE_URL",
-                      "ERR_MLX_AUTOSTART")}
+                      "ERR_MLX_AUTOSTART", "ERR_BACKEND")}
         os.environ["ERR_STATE_DIR"] = tempfile.mkdtemp(prefix="err-state-", dir=tmp)
         os.environ["ERR_MLX_MODEL"] = "mock/model"
         os.environ["ERR_BASE_URL"] = "http://127.0.0.1:9"   # nothing listens
+        # Without this the call takes the fm branch, starts the real fm server
+        # and returns instead of raising — the assertion below then lies.
+        os.environ["ERR_BACKEND"] = "mlx"
         try:
             for value in ("off", "0", "false", "no"):
                 os.environ["ERR_MLX_AUTOSTART"] = value
