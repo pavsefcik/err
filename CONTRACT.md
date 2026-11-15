@@ -38,15 +38,20 @@ over free text** — `err run` is the model verb, never the question "run".
 
 | Invocation | Goes to |
 |---|---|
-| `err` | `err.py` (explain last command) |
+| `err` | the launcher prints the help screen |
+| `err what` · `err why` · `err wtf` (hidden) | `err.py` (explain last command) |
 | `err <anything else>` | `err.py --ask "<text>"` |
 | `err new` · `clear` `-c` · `resume [n]` · `delete` | `err.py` (session verbs) |
 | `err chat` `switch` `default` `run` `stop` `tui` `list` `curated` `download` `remove` `settings` `info` `cache` `clean` `uninstall` `endpoint` `status` | `err-models.zsh` (same verb, same args) |
 | `err version` `-v` `--version` | launcher prints `VERSION` |
 | `err help` `-h` `--help` | launcher prints the menu |
 
+The explain words only trigger when they stand alone: `err why` explains, `err why
+did that fail` is a question. `wtf` is the same path but deliberately absent from
+the help screen.
+
 `errc <cmd…>` runs `<cmd>`, captures stderr to `_ERR_STDERR_FILE`, then explains
-it. `errc` is **not** `noglob`-aliased (it runs real commands).
+it through the same `_err_explain` path (never through `err`, which shows help). `errc` is **not** `noglob`-aliased (it runs real commands).
 
 ## Env passed to err.py
 

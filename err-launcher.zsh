@@ -79,9 +79,10 @@ _err_help() {
   cat <<'USAGE'
 
 err v0.601.0 // in-terminal LLM & local MLX model runner
+TO ERR IS HUMAN.
 
-  err                        correct/explain the last command
-  err <question>             ask a command-related or any other question
+  err what | why             correct/explain the last command
+  err "<question>"           ask a command-related or any other question
   err new                    start a fresh session (old one stays resumable)
   err clear | -c             clear the current session, keep the id
   err resume                 resume a previous session
@@ -104,11 +105,13 @@ err v0.601.0 // in-terminal LLM & local MLX model runner
   err uninstall              remove err from your system
   err endpoint               print the base URL / model of the running server
   err version | -v           show the current version
-  err help | -h              show this help
+  err help | -h              show this help (this is also what bare `err` does)
 
-The first word decides the path: the model verbs above always win, so a
-question that starts with one of them needs quoting.  err never runs a
-model-suggested command — it drops it into your prompt buffer for you to edit.
+The first word decides the path: the verbs above always win, so a question that
+starts with one of them needs quoting. `what` / `why` explain the last command
+only when they are the whole command — `err why did that fail` is a question.
+err never runs a model-suggested command: it drops it into your prompt buffer
+for you to edit and press Enter on.
 
 USAGE
 }
@@ -241,6 +244,12 @@ err() {
 
   local verb="${1:-}"
 
+  # ---- no arguments: this is the help screen now ----
+  if (( $# == 0 )); then
+    _err_help
+    return 0
+  fi
+
   # ---- model manager verbs (win over free text) ----
   local v
   for v in "${_err_engine_verbs[@]}"; do
@@ -269,48 +278,61 @@ err() {
       ;;
   esac
 
-  # ---- explain the last command ----
-  if (( $# == 0 )); then
-    if [[ -z "$last_cmd" && $_err_consumed -eq 0 ]]; then
-      # Fresh session: fall back to history. `builtin fc` because fc may be
-      # aliased, and skip our own invocations.
-      local h=1
-      while (( h <= 10 )); do
-        last_cmd="$(builtin fc -ln -$((h)) 2>/dev/null | head -1)"
-        [[ -z "$last_cmd" ]] && break
-        last_cmd="${last_cmd#"${last_cmd%%[^[:space:]]*}"}"
-        last_cmd="${last_cmd%"${last_cmd##*[^[:space:]]}"}"
-        case "$last_cmd" in
-          *)
-            if _err_is_ours "$last_cmd"; then (( h++ )); else break; fi
-            ;;
-        esac
-      done
-      last_exit=-1
-    fi
-
-    if [[ -z "$last_cmd" ]]; then
-      print "🤔 No command to explain." >&2
-      return 1
-    fi
-
-    _err_last_cmd=""
-    _err_consumed=1
-
-    _ERR_LAST_CMD="$last_cmd"
-    _ERR_LAST_EXIT="$last_exit"
-    export _ERR_LAST_CMD _ERR_LAST_EXIT
-    _err_py
-    local rc=$?
-    (( rc == 0 )) && { (( _ERR_TURNS++ )); _err_update_rprompt; }
-    return $rc
-  fi
+  # ---- explain the last command: `err what` / `err why` / `err wtf` ----
+  # Only when the word stands alone; `err why did it fail` stays a question.
+  case "$verb" in
+    what|why|wtf)
+      if (( $# == 1 )); then
+        _err_explain "$last_cmd" "$last_exit"
+        return $?
+      fi
+      ;;
+  esac
 
   # ---- ask a question ----
   _ERR_LAST_CMD="$last_cmd"
   _ERR_LAST_EXIT="$last_exit"
   export _ERR_LAST_CMD _ERR_LAST_EXIT
   _err_py --ask "$@"
+  local rc=$?
+  (( rc == 0 )) && { (( _ERR_TURNS++ )); _err_update_rprompt; }
+  return $rc
+}
+
+# Explain the last command. Extracted because `err what|why|wtf` AND `errc` both
+# need it, and bare `err` is the help screen now.
+_err_explain() {
+  local last_cmd="$1"
+  local last_exit="$2"
+  _err_skip_exit=1
+
+  if [[ -z "$last_cmd" && $_err_consumed -eq 0 ]]; then
+    # Fresh session: fall back to history. `builtin fc` because fc may be
+    # aliased, and skip our own invocations.
+    local h=1
+    while (( h <= 10 )); do
+      last_cmd="$(builtin fc -ln -$((h)) 2>/dev/null | head -1)"
+      [[ -z "$last_cmd" ]] && break
+      last_cmd="${last_cmd#"${last_cmd%%[^[:space:]]*}"}"
+      last_cmd="${last_cmd%"${last_cmd##*[^[:space:]]}"}"
+      if _err_is_ours "$last_cmd"; then (( h++ )); else break; fi
+    done
+    last_exit=-1
+  fi
+
+  if [[ -z "$last_cmd" ]]; then
+    print "🤔 No command to explain." >&2
+    return 1
+  fi
+
+  # Consume the record so a second `err what` doesn't repeat it.
+  _err_last_cmd=""
+  _err_consumed=1
+
+  _ERR_LAST_CMD="$last_cmd"
+  _ERR_LAST_EXIT="$last_exit"
+  export _ERR_LAST_CMD _ERR_LAST_EXIT
+  _err_py
   local rc=$?
   (( rc == 0 )) && { (( _ERR_TURNS++ )); _err_update_rprompt; }
   return $rc
@@ -324,7 +346,7 @@ errc() {
   _err_last_exit=$rc
   _err_last_cmd="$*"
   _err_skip_exit=1
-  err
+  _err_explain "$_err_last_cmd" "$_err_last_exit"
   _err_skip_exit=1
   return $rc
 }

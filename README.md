@@ -31,9 +31,10 @@ Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.comman
 
 ```
 err v0.601.0 // in-terminal LLM & local MLX model runner
+TO ERR IS HUMAN.
 
-  err                        correct/explain the last command
-  err <question>             ask a command-related or any other question
+  err what | why             correct/explain the last command
+  err "<question>"           ask a command-related or any other question
   err new                    start a fresh session (old one stays resumable)
   err clear | -c             clear the current session, keep the id
   err resume                 resume a previous session
@@ -56,7 +57,7 @@ err v0.601.0 // in-terminal LLM & local MLX model runner
   err uninstall              remove err from your system
   err endpoint               print the base URL / model of the running server
   err version | -v           show the current version
-  err help | -h              show this help
+  err help | -h              show this help (this is also what bare `err` does)
 ```
 
 ## Explain & ask

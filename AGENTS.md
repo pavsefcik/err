@@ -2,8 +2,9 @@
 
 `err` is two tools wearing one name:
 
-1. **explain / ask** — `err`, `err <question>`, `errc <cmd>`, plus conversation
-   sessions. Runs on the on-device Apple Foundation Model (`fm`), no API key.
+1. **explain / ask** — `err what` / `err why` (and the hidden `err wtf`),
+   `err "<question>"`, `errc <cmd>`, plus conversation sessions. Bare `err`
+   prints the help screen. Runs on the on-device Apple Foundation Model (`fm`), no API key.
 2. **model manager** — `err run|switch|default|stop|chat|list|curated|download|
    remove|settings|info|cache|clean|endpoint|status|uninstall|tui`, carried over
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
@@ -49,9 +50,13 @@ cache, never there.
 3. **Data on stdout, diagnostics on stderr, exit codes 0/1/2.** The `--json`
    shapes of `status`, `list`, `info`, `endpoint` and `curated` are consumed by
    the pi extension and other clients — do not reshape them, extend them.
-4. **Reserved verbs win over free text.** `err run` is the model verb, never the
+4. **`err` with no arguments is the help screen.** It is not "explain" any
+   more: explaining needs the word (`what`/`why`/`wtf`), and even then only when
+   the word stands alone. `errc` calls `_err_explain` directly — routing it
+   through `err` would print help instead of explaining.
+5. **Reserved verbs win over free text.** `err run` is the model verb, never the
    question "run". Documented in the help text; do not "fix" it.
-5. **The launcher must survive being sourced into someone else's shell.** No
+6. **The launcher must survive being sourced into someone else's shell.** No
    `set -e`, no `exit`, no clobbering a non-empty `RPROMPT`/`PROMPT`, no tty
    writes at source time, and it must work under `setopt nounset`.
 

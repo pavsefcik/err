@@ -7,6 +7,14 @@ All notable changes to err are documented here. Format follows
 
 err and marv-mlx are now one tool.
 
+### Changed
+
+- Bare `err` prints the help screen instead of explaining the last command.
+  Explaining is now explicit: `err what` or `err why` (and a hidden `err wtf`),
+  and only when the word stands alone — `err why did that fail` is still a
+  question. `errc` is unaffected: it calls the explainer directly.
+- The help screen carries the tagline: *TO ERR IS HUMAN.*
+
 ### Fixed
 
 - `esc` in a model menu aborts instead of falling through to a second

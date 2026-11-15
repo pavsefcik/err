@@ -63,10 +63,29 @@ _CALLS=()
 err how do I see open ports >/dev/null 2>&1
 _check "py:--ask how do I see open ports" "${_CALLS[1]:-}" "err <question>"
 
-print "bare -> explain"
+print "bare err -> help"
 _CALLS=()
 err >/dev/null 2>&1
-_check "py:" "${_CALLS[1]:-}" "err (explain, no args)"
+_check "help" "${_CALLS[1]:-}" "err (no args shows help)"
+
+print "explain words"
+for w in what why wtf; do
+  _CALLS=()
+  _err_last_cmd="lsof -ti:3000"; _err_consumed=0   # explain consumes the record
+  err $w >/dev/null 2>&1
+  _check "py:" "${_CALLS[1]:-}" "err $w explains the last command"
+done
+_CALLS=()
+err what is a glob >/dev/null 2>&1
+_check "py:--ask what is a glob" "${_CALLS[1]:-}" "err what is a glob asks a question"
+_CALLS=()
+err why did that fail >/dev/null 2>&1
+_check "py:--ask why did that fail" "${_CALLS[1]:-}" "err why did that fail asks a question"
+
+print "errc explains without printing help"
+_CALLS=()
+errc true >/dev/null 2>&1
+_check "py:" "${_CALLS[1]:-}" "errc <cmd> goes to the explainer"
 
 print "unquoted ? survives (noglob alias)"
 _CALLS=()
