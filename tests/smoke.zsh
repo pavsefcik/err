@@ -60,6 +60,14 @@ if [[ ! -s "$_TMP/port" ]]; then
 fi
 MOCK_URL="$(<"$_TMP/port")"
 
+# A fake model in the throwaway hub, so the engine's read-only verbs have
+# something to describe (never used to launch anything).
+FAKE_MODEL="mock-org/Fake-4bit"
+mkdir -p "$ERR_HUB_DIR/models--mock-org--Fake-4bit/snapshots/rev"
+print -r -- "weights" > "$ERR_HUB_DIR/models--mock-org--Fake-4bit/snapshots/rev/model.safetensors"
+print -r -- '{"model_type":"qwen2"}' \
+  > "$ERR_HUB_DIR/models--mock-org--Fake-4bit/snapshots/rev/config.json"
+
 # A conf that talks to the mock and never tries to launch anything real.
 sed -e "s|^backend = .*|backend = mlx|" \
     -e "s|^mlx_base_url = .*|mlx_base_url = $MOCK_URL|" \
@@ -160,7 +168,39 @@ contains "RC=1" "$_out" "errc preserves the command exit code"
 _out=$(int_sh 'errc true >/dev/null 2>&1; print "DONE"; print "HASHELP=$(err | grep -c "TO ERR IS HUMAN")"')
 contains "HASHELP=1" "$_out" "errc did not leave the help screen behind"
 
-# ── 6. a dead backend fails loudly, not silently ──────────────────────
+# ── 6. engine verbs that only read ────────────────────────────────────
+print "engine read-only verbs"
+_out=$(cmd_out 'err list')
+contains "$FAKE_MODEL" "$_out" "err list finds the fake model"
+not_contains ".safetensors" "$_out" "err list prints ids only"
+
+_out=$(cmd_out 'err info mock-org/Fake-4bit')
+contains "Installed:  true" "$_out" "err info reports installation"
+contains "Size:" "$_out" "err info reports a size"
+
+_out=$(cmd_out 'err curated')
+contains "mlx-community/" "$_out" "err curated lists the bundled catalog"
+
+_out=$(cmd_out 'err cache')
+contains "$ERR_STATE_DIR" "$_out" "err cache reports the state dir"
+contains "* = regenerable" "$_out" "err cache explains the regenerable marker"
+
+_out=$(cmd_out 'err clean --all --dry-run')
+contains "dry run" "$_out" "err clean --dry-run refuses to delete"
+[[ -d "$ERR_STATE_DIR" ]] && ok "err clean --dry-run left the state dir alone"
+
+_out=$(cmd_out 'err status --json; print "RC=$?"')
+contains "null" "$_out" "status --json is null when nothing serves :11500"
+contains "RC=1" "$_out" "status --json exits 1 when nothing is running"
+
+_out=$(cmd_out 'err endpoint; print "RC=$?"')
+contains "no model running" "$_out" "err endpoint says when nothing is running"
+
+_out=$(cmd_out "err help | grep -m1 'err v0.601.0'")
+contains "err v0.601.0" "$_out" "err help prints the banner"
+check "$(cmd_out 'err help')" "$(cmd_out 'err -h')" "err help and err -h agree"
+
+# ── 7. a dead backend fails loudly, not silently ──────────────────────
 print "failure modes"
 _badconf="$_TMP/bad.conf"
 sed -e "s|^backend = .*|backend = mlx|" \
