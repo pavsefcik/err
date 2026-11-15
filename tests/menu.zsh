@@ -113,6 +113,11 @@ else
 fi
 rm -f "$ERR_STATE_DIR/default-model"
 
+# The download picker uses the same map; it must offer the catalog too.
+_out=$(engine_gum dump download 2>&1)
+contains "mlx-community/" "$_out" "err download offers curated models"
+contains "GB RAM Tier Models" "$_out" "catalog rows carry their RAM tier"
+
 # ── cancel must abort, not fall through ───────────────────────────────
 print "cancel"
 _out=$(engine_gum dump run 2>&1); rc=$?
