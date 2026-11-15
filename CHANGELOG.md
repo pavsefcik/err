@@ -9,6 +9,13 @@ err and marv-mlx are now one tool.
 
 ### Fixed
 
+- `esc` in a model menu aborts instead of falling through to a second
+  "Nothing installed" menu with the installed models listed.
+- The default row is starred even before `err default` is ever run: with
+  `backend = fm` in `err.conf`, `apple-fm` is the default, so the `*` matches
+  what a bare `err` actually uses.
+- Menu headers are white instead of purple, and start on their own line.
+
 - The `foreign sitecustomize.py …` line no longer prints on every command
   (it was never actionable; `ERR_DEBUG=1` brings it back).
 - Menu rows line up: the default marker is ASCII `*`, not a double-width `★`,

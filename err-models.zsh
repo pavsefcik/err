@@ -2108,11 +2108,19 @@ PY
     return 1
   }
 
-  _err_default_model() {   # the model `err run`/`chat` should prefer
-    local f="$state_dir/default-model" m
-    [[ -r "$f" ]] || return 1
-    m="$(<"$f")"
-    m="${m//[[:space:]]/}"
+  # The model `err run`/`err chat` prefer. With no explicit choice, err's own
+  # backend is the honest default: `backend = fm|pcc` in err.conf means the
+  # on-device Apple model is what you get when you just type `err`.
+  _err_default_model() {
+    local f="$state_dir/default-model" m="" b=""
+    if [[ -r "$f" ]]; then
+      m="$(<"$f")"; m="${m//[[:space:]]/}"
+    fi
+    if [[ -z "$m" && -r "$_ERR_SRC_DIR/err.conf" ]]; then
+      b=$(grep -E '^[[:space:]]*backend[[:space:]]*=' "$_ERR_SRC_DIR/err.conf" 2>/dev/null \
+        | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
+      [[ "$b" == (fm|pcc) ]] && m="$_ERR_FM_ID"
+    fi
     [[ -n "$m" ]] && print -r -- "$m"
   }
 
@@ -2129,10 +2137,23 @@ PY
   _ERR_FM_LABEL="apple-fm  (Apple on-device)"
 
   # Run the gum chooser over stdin and map the label back to a model id.
+  # Header is white (gum defaults to purple 99) and sits one line below the
+  # command. Cancelling is not an error: esc must abort silently, not fall
+  # through to another menu.
   _err_pick() {
-    local header="$1" choice
-    choice=$(gum choose --header "$header" --height 20) || return 1
-    [[ -z "$choice" ]] && return 1
+    local header="$1" choice rc errf
+    errf=$(mktemp)
+    choice=$(gum choose --header $'\n'"$header" --header.foreground 255 --height 20 2>"$errf")
+    rc=$?
+    if (( rc != 0 )) || [[ -z "$choice" ]]; then
+      # gum says "nothing selected" on esc; that is not worth showing.
+      if [[ -s "$errf" ]] && ! grep -qi 'nothing selected' "$errf" 2>/dev/null; then
+        cat "$errf" >&2
+      fi
+      rm -f "$errf"
+      return 1
+    fi
+    rm -f "$errf"
     [[ -n "${_ERR_PICK_MAP[$choice]:-}" ]] && print -r -- "${_ERR_PICK_MAP[$choice]}"
   }
 
@@ -2208,13 +2229,7 @@ PY
       return $?
     fi
     if [[ -z "$model" ]]; then
-      if ! model=$(_err_pick_installed "Start which model on :11500?"); then
-        if model=$(_err_pick_catalog "Nothing installed — download and start:"); then
-          _err_headless_download "$model" || return 1
-        else
-          return 1
-        fi
-      fi
+      model=$(_err_pick_installed "Start which model?") || return 1
     fi
     # Fetch uncached weights before choosing a backend: the streaming-MoE
     # compatibility check reads the cached config.json, so a fresh model has to

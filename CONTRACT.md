@@ -75,6 +75,11 @@ It is offered by `_err_pick_installed`, `_err_pick_catalog` and
 `chat`, `stop` and `status`. `err list` stays HF-only (machine-readable) and
 `err endpoint` keeps reporting `:11500` for OpenAI clients.
 
+With no `default-model` file, `_err_default_model` derives the default from
+`err.conf`: `backend = fm|pcc` means the Apple model is the default (marked `*`),
+which matches what a bare `err` already uses. Only an explicit
+`err default <model>` overrides that.
+
 ## err.conf keys
 
 Existing keys stay. Added:
