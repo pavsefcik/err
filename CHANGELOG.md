@@ -22,6 +22,11 @@ err and marv-mlx are now one tool.
 
 ### Fixed
 
+- `err default` / `err switch` now repoint the explain layer. They used to touch
+  only the model manager, so picking an MLX model left `err what` answering from
+  Apple FM (`backend = fm` in `err.conf` was never updated). `err status` now
+  prints `backend=` and the chosen default so the state is visible.
+
 - `esc` in a model menu aborts instead of falling through to a second
   "Nothing installed" menu with the installed models listed.
 - The default row is starred even before `err default` is ever run: with

@@ -94,7 +94,8 @@ which matches what a bare `err` already uses. Only an explicit
 Existing keys stay. Added:
 
 ```
-backend        = fm | mlx | pcc     (default fm; mlx = the :11500 server)
+backend        = fm | mlx | pcc     (managed by `err default`/`err switch`;
+                                    mlx = the :11500 server)
 mlx_base_url   = http://127.0.0.1:11500
 history_turns  = 6                  (verbatim turns kept in the window)
 suggest        = ask | history | off (what to do with the recommended command)

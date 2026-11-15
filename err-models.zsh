@@ -2142,6 +2142,45 @@ PY
 
   _ERR_FM_LABEL="apple-fm  (Apple on-device)"
 
+  # Rewrite one `key = value` line in err.conf, leaving every other line
+  # untouched. This is how `err switch`/`err default` reach the explain layer:
+  # err.conf -> backend is what err.py actually reads.
+  _err_conf_set() {
+    local key="$1" value="$2" f="$_ERR_SRC_DIR/err.conf" tmp
+    [[ -r "$f" ]] || return 1
+    tmp=$(mktemp)
+    awk -v k="$key" -v v="$value" '
+      BEGIN { done = 0 }
+      $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { print k " = " v; done = 1; next }
+      { print }
+      END { if (!done) print k " = " v }
+    ' "$f" > "$tmp" && mv "$tmp" "$f"
+  }
+
+  _err_conf_get() {
+    local key="$1" f="$_ERR_SRC_DIR/err.conf"
+    [[ -r "$f" ]] || return 1
+    # ${key} braces matter: `$key[...]` is an array subscript in zsh, not a
+    # regex — it fails with "bad output format specification".
+    grep -E "^[[:space:]]*${key}[[:space:]]*=" "$f" 2>/dev/null | head -1 \
+      | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]'
+  }
+
+  # Point the explain layer at a model: the Apple on-device model runs on `fm`
+  # (or Private Cloud Compute), every HF repo runs on the :11500 server.
+  _err_point_backend_at() {
+    local model="$1" cur
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      cur=$(_err_conf_get backend)
+      [[ "$cur" == pcc ]] || _err_conf_set backend fm
+      print "err: explain/ask now uses the on-device Apple model"
+    else
+      _err_conf_set backend mlx
+      print "err: explain/ask now uses $model on :11500"
+      print "  (start it with: err run $model)"
+    fi
+  }
+
   # Run the gum chooser over stdin and map the label back to a model id.
   # Header is white (gum defaults to purple 99) and sits one line below the
   # command. Cancelling is not an error: esc must abort silently, not fall
@@ -2317,7 +2356,8 @@ PY
     if [[ -z "$model" ]]; then
       model=$(_err_pick_installed "Switch to which model?") || return 1
     fi
-    _err_headless_run "$model"
+    _err_headless_run "$model" || return $?
+    _err_point_backend_at "$model"
   }
 
   # err default [model] — remember the model `err run` / `err chat` prefer.
@@ -2336,6 +2376,7 @@ PY
     fi
     print -r -- "$model" > "$state_dir/default-model"
     print "err: default model = $model"
+    _err_point_backend_at "$model"
     print "  * marks it in the menus (err run / err switch / err chat)"
   }
 
@@ -2408,6 +2449,10 @@ PY
     local json=0 any=0 fmpid fmport
     [[ "${1:-}" == "--json" ]] && json=1
     if (( ! json )); then
+      local be bemodel
+      be=$(_err_conf_get backend); be=${be:-fm}
+      bemodel=$(cat "$state_dir/default-model" 2>/dev/null | tr -d '[:space:]')
+      print "err: backend=$be${bemodel:+  default=$bemodel}"
       fmport=$(_err_fm_port)
       if fmpid=$(_err_fm_running); then
         printf '%s\t:%s\tpid %s  (Apple on-device)\n' "$_ERR_FM_ID" "$fmport" "$fmpid"

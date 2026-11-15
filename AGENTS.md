@@ -77,6 +77,13 @@ cache, never there.
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
+- **`$var[` is an array subscript in zsh.** `grep -E "^\s*$key[[:space:]]*="` is
+  parsed as `$key[...]` and dies with "bad output format specification". Write
+  `${key}` whenever a variable is followed by `[`.
+- **The chosen model must reach the explain layer.** `err default` / `err switch`
+  write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
+  (`_err_point_backend_at`). Writing only the file leaves `err` answering from
+  `fm` while the menu shows another model as default — that was a real bug.
 - **`APC_DISK_MAX_GB` is per model directory, not per store.** mlx-vlm bounds
   each `<model>_s4-<hash>/` separately, so N models cost N × cap (18 GiB on a
   5-model install). `_err_apc_sweep` bounds the total and runs before every

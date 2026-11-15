@@ -94,7 +94,7 @@ err owns the full local-model lifecycle:
 - `err list` / `err curated` — what is installed, and the curated catalog for every RAM tier.
 - `err download <model>` / `err remove <model>` — fetch from the HuggingFace Hub, or delete from disk.
 - `err chat <model>` — start a model and open the built-in interactive chat.
-- `err switch <model>` / `err default <model>` — change the active model, or the one used by default.
+- `err switch <model>` / `err default <model>` — change the active model, or the one used by default. Both also repoint the explain layer (`err.conf` → `backend`), so `err what` / `err <question>` answer with the model you picked: `apple-fm` → the on-device model, any HF repo → the `:11500` server. `err status` shows which backend err is currently using.
 - `err run <model>` / `err stop <model>` — start and stop a server (stop defaults to every running model).
 - `err status` / `err endpoint` — what is running and where to reach it.
 - `err settings` — basic and advanced launch settings.
