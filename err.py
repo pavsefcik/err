@@ -194,18 +194,54 @@ def mlx_model_id() -> str:
     return ""
 
 
+def autostart_enabled() -> bool:
+    v = (os.environ.get("ERR_MLX_AUTOSTART") or CFG.get("mlx_autostart", "on"))
+    return v.strip().lower() not in ("0", "off", "false", "no")
+
+
+def autostart_mlx(base: str, model: str) -> bool:
+    """Bring :11500 up by asking the engine, so a question never needs `err run`.
+
+    Launching lives in err-models.zsh (weights, flags, APC, MoE); err.py only
+    asks for it. The engine stops whatever else is on :11500 first, and waits
+    for the weights — which is why there is no timeout here.
+    """
+    engine = os.path.join(SCRIPT_DIR, "err-models.zsh")
+    if not os.path.isfile(engine):
+        print(f"❌ engine missing: {engine} — re-run install.sh", file=sys.stderr)
+        return False
+    print(
+        f"🚀 starting {model} on {base} (no model was serving there)…",
+        file=sys.stderr,
+    )
+    # Data on stdout is err's contract: the engine's chatter goes to stderr.
+    # A real stderr fd keeps it live during a multi-minute load; without one
+    # (embedded callers) drop it rather than crashing.
+    chatter = sys.stderr
+    try:
+        chatter.fileno()
+    except Exception:
+        chatter = subprocess.DEVNULL
+    try:
+        rc = subprocess.call(
+            ["zsh", engine, "ensure", model],
+            stdout=chatter,
+            stderr=chatter,
+        )
+    except OSError as exc:
+        print(f"❌ could not run the engine: {exc}", file=sys.stderr)
+        return False
+    if rc != 0:
+        print(f"❌ starting {model} failed (exit {rc})", file=sys.stderr)
+        return False
+    return health_ok(base)
+
+
 def prepare_backend() -> tuple:
     """Return (base_url, model_id) for the configured backend."""
     backend = backend_name()
     if backend == "mlx":
         base = mlx_base_url()
-        # Never start fm for the mlx backend: just point at the running server.
-        if not health_ok(base):
-            print(
-                f"❌ mlx server not reachable at {base} — start it with: err run <model>",
-                file=sys.stderr,
-            )
-            sys.exit(1)
         model = mlx_model_id()
         if not model:
             print(
@@ -213,6 +249,17 @@ def prepare_backend() -> tuple:
                 file=sys.stderr,
             )
             sys.exit(1)
+        # Never start fm for the mlx backend. When :11500 is down, start the
+        # chosen model instead of telling the user to run `err run` first; the
+        # engine swaps out a different model if one is already serving.
+        if not health_ok(base):
+            if not (autostart_enabled() and autostart_mlx(base, model)):
+                print(
+                    f"❌ mlx server not reachable at {base} — start it with: err run {model}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            model = mlx_model_id() or model
         return base, model
 
     # fm and pcc both use the on-device fm server.

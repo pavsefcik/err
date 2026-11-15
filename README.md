@@ -41,7 +41,7 @@ TO ERR IS HUMAN.
   err delete                 delete all sessions
   err status                 show what is running
   err chat <model>           start a model and open the built-in interactive chat
-  err switch <model>         switch to another model
+  err switch | swap <model>  switch to another model
   err default <model>        set model as default
   err run <model>            start a model on port 11500
   err stop <model>           stop a running model (default: all)

@@ -88,6 +88,16 @@ cache, never there.
   write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from
   `fm` while the menu shows another model as default — that was a real bug.
+  `err switch` must also write `default-model`, not just `last-model`: switch is
+  a move, and a pick that only lives in `last-model` reads as "it went back to
+  the previous model" on the next call.
+- **Starting :11500 is err.py's job.** When `backend = mlx` and the server is
+  down, err.py runs the hidden engine verb `ensure <model>` (stop every err
+  server, start the chosen model) instead of printing "start it with `err run`".
+  The engine's stdout is redirected to **stderr** in that call — stdout is the
+  answer, and mixing them breaks `err "<q>" | pbcopy`. `ensure` also *waits* for a
+  model that is already loading instead of killing it: relaunching costs the
+  whole load again. `mlx_autostart = off` is the escape hatch.
 - **`APC_DISK_MAX_GB` is per model directory, not per store.** mlx-vlm bounds
   each `<model>_s4-<hash>/` separately, so N models cost N × cap (18 GiB on a
   5-model install). `_err_apc_sweep` bounds the total and runs before every

@@ -3,6 +3,25 @@
 All notable changes to err are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- `err "<question>"` / `err what` start the model themselves when `backend = mlx`
+  and nothing serves `:11500`. err.py resolves the saved model and calls the
+  engine's hidden `ensure` verb, which stops whatever else holds `:11500` first —
+  no more `err run <model>` in between, and no more `❌ mlx server not reachable`.
+  A model that is already loading is waited for, not killed and relaunched.
+  `mlx_autostart = off` in `err.conf` (or `ERR_MLX_AUTOSTART=off`) keeps err from
+  loading weights behind your back.
+
+### Fixed
+
+- `err switch` keeps the pick. It started the model but recorded only
+  `last-model`, so the next call could fall back to the model you had just
+  switched away from; switch now also writes `default-model` like
+  `err default` does.
+
 ## [0.601.0]
 
 err and marv-mlx are now one tool.
@@ -14,6 +33,8 @@ err and marv-mlx are now one tool.
   and only when the word stands alone — `err why did that fail` is still a
   question. `errc` is unaffected: it calls the explainer directly.
 - The help screen carries the tagline: *TO ERR IS HUMAN.*
+- `err swap <model>` is a synonym for `err switch` (same menu, same backend
+  repoint).
 - A suggested command is no longer dropped straight into the prompt buffer. It
   goes to shell history (`suggest = history`, the new default), so ↑ recalls it
   and nothing is filled in for you. `suggest = ask` restores the buffer

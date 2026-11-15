@@ -230,6 +230,48 @@ def main():
                     os.environ[k] = v
         ok("mlx model id resolution")
 
+        # Autostart: `err "<question>"` brings the server up itself, but must
+        # never spawn a launch when the user turned it off (scripts, CI, a
+        # machine where loading 6 GB of weights is not wanted).
+        saved_env = {k: os.environ.get(k) for k in
+                     ("ERR_STATE_DIR", "ERR_MLX_MODEL", "ERR_BASE_URL",
+                      "ERR_MLX_AUTOSTART")}
+        os.environ["ERR_STATE_DIR"] = tempfile.mkdtemp(prefix="err-state-", dir=tmp)
+        os.environ["ERR_MLX_MODEL"] = "mock/model"
+        os.environ["ERR_BASE_URL"] = "http://127.0.0.1:9"   # nothing listens
+        try:
+            for value in ("off", "0", "false", "no"):
+                os.environ["ERR_MLX_AUTOSTART"] = value
+                check(not errmod.autostart_enabled(),
+                      f"ERR_MLX_AUTOSTART={value} should disable autostart")
+            os.environ["ERR_MLX_AUTOSTART"] = "on"
+            check(errmod.autostart_enabled(), "ERR_MLX_AUTOSTART=on should enable it")
+            os.environ.pop("ERR_MLX_AUTOSTART")
+            check(errmod.autostart_enabled(), "autostart should default to on")
+
+            # With autostart off and no server, the old instruction is printed
+            # and err exits 1 instead of hanging or launching.
+            os.environ["ERR_MLX_AUTOSTART"] = "off"
+            import io
+            import contextlib
+            err_out = io.StringIO()
+            raised = 0
+            with contextlib.redirect_stderr(err_out):
+                try:
+                    errmod.prepare_backend()
+                except SystemExit as exc:
+                    raised = exc.code
+            check(raised == 1, f"prepare_backend should exit 1, got {raised!r}")
+            check("not reachable" in err_out.getvalue(),
+                  "missing the not-reachable message: " + err_out.getvalue())
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        ok("mlx autostart opt-out")
+
         print(f"\nALL {len(passed)} TESTS PASSED")
         return 0
     except AssertionError as exc:

@@ -2177,7 +2177,7 @@ PY
     else
       _err_conf_set backend mlx
       print "err: explain/ask now uses $model on :11500"
-      print "  (start it with: err run $model)"
+      print "  (starts on demand; 'err run $model' starts it now)"
     fi
   }
 
@@ -2350,14 +2350,76 @@ PY
     return 0
   }
 
-  # err switch [model] — stop whatever serves :11500 and start another.
+  # err switch [model] — stop whatever serves :11500 and start another, and
+  # KEEP that choice: a switch is a move, not a one-off. The pick is written to
+  # default-model as well, otherwise the next err call would fall back to the
+  # model you just switched away from (mlx_model_id reads last-model, and the
+  # menus/`err ensure` read default-model).
   _err_headless_switch() {
     local model="${1:-}"
     if [[ -z "$model" ]]; then
       model=$(_err_pick_installed "Switch to which model?") || return 1
     fi
     _err_headless_run "$model" || return $?
+    print -r -- "$model" > "$state_dir/default-model"
     _err_point_backend_at "$model"
+  }
+
+  # Wait until :11500 answers /v1/models. $1 = max seconds (default 600). A
+  # model another shell launched keeps loading; this lets a second call wait for
+  # it instead of trying to launch a second copy.
+  _err_wait_health() {
+    local i deadline=$(( ${1:-600} * 2 ))
+    for i in {1..$deadline}; do
+      curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:11500/v1/models" 2>/dev/null && return 0
+      sleep 0.5
+    done
+    return 1
+  }
+
+  # err ensure [model] — hidden verb, called by err.py. Make :11500 serve
+  # `model` right now so asking a question never needs a separate `err run`:
+  #   nothing there        -> start it
+  #   another model there  -> stop every err server, start this one on :11500
+  #   this model there     -> wait for it to finish loading, change nothing
+  # Model comes from default-model (then last-model) when the arg is omitted.
+  _err_headless_ensure() {
+    local model="${1:-}" pid port cur
+    [[ -z "$model" ]] && model=$(_err_default_model)
+    if [[ -z "$model" ]]; then
+      print -u2 "err: no model selected — pick one with: err default <model>"
+      return 1
+    fi
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      print -u2 "err: $model is served by the fm backend, not on :11500"
+      print -u2 "err: choose an MLX model with: err default <model>"
+      return 1
+    fi
+    cur=""
+    if [[ -n "$(_err_running_model)" ]]; then
+      read -r pid port cur <<< "$(_err_running_model)"
+    fi
+    if [[ -n "$cur" && "$cur" == "$model" ]]; then
+      # Right model, not answering yet: it is still loading. Never kill and
+      # relaunch it — that would restart a several-minute load.
+      print -u2 "err: $model is still loading on :11500 — waiting…"
+      if _err_wait_health 600; then
+        _err_note_last_model "$model"
+        return 0
+      fi
+      print -u2 "err: $model never answered on :11500 — see $log_dir"
+      return 1
+    fi
+    if [[ -n "$(_err_running)" ]]; then
+      print -u2 "err: stopping ${cur:-the running model} so :11500 can serve $model"
+      _err_stop_all >/dev/null 2>&1
+      local i
+      for i in {1..40}; do
+        _err_port_free 11500 && break
+        sleep 0.2
+      done
+    fi
+    _err_headless_run "$model"
   }
 
   # err default [model] — remember the model `err run` / `err chat` prefer.
@@ -2743,7 +2805,10 @@ PY
     case "$_sub" in
       run|serve)  _err_headless_run      "$@" ;;
       chat)       _err_headless_chat     "$@" ;;
-      switch)     _err_headless_switch   "$@" ;;
+      switch|swap) _err_headless_switch  "$@" ;;
+      # Hidden: err.py's autostart path (see _err_headless_ensure). Not in
+      # _err_usage, not in the launcher's verb list, not for humans.
+      ensure)     _err_headless_ensure   "$@" ;;
       default|set-default) _err_headless_default "$@" ;;
       remove|rm)  _err_headless_remove   "$@" ;;
       settings|config) _err_headless_settings "$@" ;;

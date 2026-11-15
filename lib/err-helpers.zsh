@@ -200,7 +200,7 @@ Usage:
   err tui                    interactive TUI (browse / run / download)
   err run [<model>]          start a model on :11500 (detached); no arg = menu
   err chat [<model>]         chat with the default/last model, or pick one
-  err switch [<model>]       stop :11500 and start another model
+  err switch|swap [<model>]  stop :11500 and start another model
   err default [<model>]      set the model `run`/`chat` prefer
   err stop [<model>|--all]   stop a running model (default: all)
   err status [--json]        show what is running

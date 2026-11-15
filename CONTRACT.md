@@ -42,7 +42,8 @@ over free text** — `err run` is the model verb, never the question "run".
 | `err what` · `err why` · `err wtf` (hidden) | `err.py` (explain last command) |
 | `err <anything else>` | `err.py --ask "<text>"` |
 | `err new` · `clear` `-c` · `resume [n]` · `delete` | `err.py` (session verbs) |
-| `err chat` `switch` `default` `run` `stop` `tui` `list` `curated` `download` `remove` `settings` `info` `cache` `clean` `uninstall` `endpoint` `status` | `err-models.zsh` (same verb, same args) |
+| `err chat` `switch` `swap` `default` `run` `stop` `tui` `list` `curated` `download` `remove` `settings` `info` `cache` `clean` `uninstall` `endpoint` `status` | `err-models.zsh` (same verb, same args) |
+| `ensure <model>` | `err-models.zsh`, **hidden** — called by err.py, never by a user |
 | `err version` `-v` `--version` | launcher prints `VERSION` |
 | `err help` `-h` `--help` | launcher prints the menu |
 
@@ -67,7 +68,19 @@ it through the same `_err_explain` path (never through `err`, which shows help).
 
 Test/CI overrides (never needed interactively): `ERR_BACKEND`, `ERR_BASE_URL`,
 `ERR_SUGGEST` override the matching `err.conf` values so `tests/test_err.py` can
-point at a mock server with no `fm` and no network.
+point at a mock server with no `fm` and no network. `ERR_MLX_AUTOSTART`
+(`on`/`off`) overrides `err.conf` → `mlx_autostart`.
+
+## Starting the server is err.py's job now
+
+With `backend = mlx`, err.py never says "start it with `err run`" while it can
+start it itself. When `mlx_base_url` does not answer `/v1/models` it resolves the
+model (`mlx_model_id`) and runs `zsh err-models.zsh ensure <model>`, whose stdout
+is sent to **stderr** — stdout belongs to the answer. `ensure` is the swap rule:
+nothing there → start; another model there → stop every err server, start this
+one on `:11500`; the same model there → wait for it to finish loading (never
+kill and relaunch a multi-minute load). `mlx_autostart = off` (or
+`ERR_MLX_AUTOSTART=off`) restores the old instruction instead of loading weights.
 
 The launcher reads `_ERR_SUGGEST_FILE` after the call: if it holds one
 non-empty line under 400 bytes, it consumes it per `err.conf` → `suggest`:
@@ -89,6 +102,11 @@ With no `default-model` file, `_err_default_model` derives the default from
 which matches what a bare `err` already uses. Only an explicit
 `err default <model>` overrides that.
 
+`err switch <model>` is a move, not a one-off: it starts the model **and**
+writes `default-model` (plus `backend = mlx`), so the pick survives the shell.
+It used to update only `last-model`, which is why the next err call could go
+back to the model you had just switched away from.
+
 ## err.conf keys
 
 Existing keys stay. Added:
@@ -97,6 +115,8 @@ Existing keys stay. Added:
 backend        = fm | mlx | pcc     (managed by `err default`/`err switch`;
                                     mlx = the :11500 server)
 mlx_base_url   = http://127.0.0.1:11500
+mlx_autostart  = on                 (start the saved model when :11500 is down;
+                                    off = print "err run <model>" instead)
 history_turns  = 6                  (verbatim turns kept in the window)
 suggest        = ask | history | off (what to do with the recommended command)
 ```
