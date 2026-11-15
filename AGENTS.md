@@ -40,9 +40,11 @@ cache, never there.
 
 ## Invariants — break these and the tool stops being err
 
-1. **Never execute model output.** The model's suggested command goes to
-   `_ERR_SUGGEST_FILE`; the launcher drops it into the prompt buffer with
-   `print -z`. The human is the confirmation step. This is the line between err
+1. **Never execute model output, and don't pre-fill either.** The model's
+   suggested command goes to `_ERR_SUGGEST_FILE`; the launcher consumes it
+   according to `err.conf` → `suggest`: `history` (default) appends it to shell
+   history with `print -s` so ↑ recalls it, `ask` uses `print -z` to drop it in
+   the buffer, `off` discards it. ↑ *is* the confirmation step. This is the line between err
    and the tool it replaced.
 2. **`err.py` is stdlib-only and Python-3.9-clean.** It is invoked as bare
    `python3`, and that can be the CLT's 3.9. No new dependencies, no

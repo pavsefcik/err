@@ -14,6 +14,11 @@ err and marv-mlx are now one tool.
   and only when the word stands alone — `err why did that fail` is still a
   question. `errc` is unaffected: it calls the explainer directly.
 - The help screen carries the tagline: *TO ERR IS HUMAN.*
+- A suggested command is no longer dropped straight into the prompt buffer. It
+  goes to shell history (`suggest = history`, the new default), so ↑ recalls it
+  and nothing is filled in for you. `suggest = ask` restores the buffer
+  behaviour, `suggest = off` stops offering commands. Documented in the help
+  screen and `err.conf`.
 
 ### Fixed
 

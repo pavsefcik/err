@@ -70,7 +70,9 @@ Test/CI overrides (never needed interactively): `ERR_BACKEND`, `ERR_BASE_URL`,
 point at a mock server with no `fm` and no network.
 
 The launcher reads `_ERR_SUGGEST_FILE` after the call: if it holds one
-non-empty line under 400 bytes, it does `print -z` on it. `_ERR_TOKENS_FILE`
+non-empty line under 400 bytes, it consumes it per `err.conf` → `suggest`:
+`history` (default) → `print -s` (↑ recalls; skipped if already the newest
+history entry), `ask` → `print -z` (prompt buffer), `off` → discarded. `_ERR_TOKENS_FILE`
 feeds `RPROMPT`.
 
 ## The on-device model is a selectable row

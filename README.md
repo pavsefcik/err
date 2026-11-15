@@ -73,7 +73,7 @@ errc git push origin main
 
 The explain layer is configured in `err.conf` (prompts, temperature, backend): `backend = fm` uses the on-device Apple Foundation Model (the default), `backend = pcc` uses Private Cloud Compute, and `backend = mlx` points it at the local model server on `:11500`.
 
-**err never executes a command a model suggests.** It prints the suggestion into your prompt buffer — press Enter yourself if you want to run it.
+**err never executes a command a model suggests.** With the default setting (`suggest = history` in `err.conf`) the suggestion is appended to your shell history: press **↑** to recall it, read it, edit it, then Enter — or never. `suggest = ask` drops it into the prompt buffer instead, `suggest = off` stops offering commands.
 
 ### Quoting
 

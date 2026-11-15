@@ -110,8 +110,9 @@ TO ERR IS HUMAN.
 The first word decides the path: the verbs above always win, so a question that
 starts with one of them needs quoting. `what` / `why` explain the last command
 only when they are the whole command — `err why did that fail` is a question.
-err never runs a model-suggested command: it drops it into your prompt buffer
-for you to edit and press Enter on.
+err never runs a model-suggested command. It appends it to your shell history,
+so ↑ recalls it and you decide what to do with it — `suggest = ask` in err.conf
+puts it in the prompt buffer instead, `suggest = off` stops offering it.
 
 USAGE
 }
@@ -166,17 +167,38 @@ _err_py() {
   return $rc
 }
 
-# The model's recommended command goes to the prompt buffer, never to the
-# shell. print -z is the human-confirmed version of mang.sh's "Run it? [Y/n]".
+# err.conf -> suggest: history | ask | off
+#   history (default)  append to shell history — press ↑ to recall, edit, run
+#   ask                drop straight into the prompt buffer (print -z)
+#   off                don't offer the command at all
+_err_suggest_mode() {
+  local v=""
+  [[ -r "$_ERR_DIR/err.conf" ]] && v=$(grep -E '^[[:space:]]*suggest[[:space:]]*=' \
+    "$_ERR_DIR/err.conf" 2>/dev/null | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
+  print -r -- "${v:-history}"
+}
+
+# The model's recommended command never reaches the shell on its own. With the
+# default it only lands in history, so ↑ is the confirmation step.
 _err_take_suggestion() {
   [[ -s "$_ERR_SUGGEST_FILE" ]] || return 0
-  local cmd
+  local cmd mode
   cmd="$(head -1 "$_ERR_SUGGEST_FILE" 2>/dev/null)"
   rm -f "$_ERR_SUGGEST_FILE" 2>/dev/null
   [[ -z "$cmd" ]] && return 0
   (( ${#cmd} > 400 )) && return 0
-  # print -z needs an interactive ZLE-capable shell.
-  [[ -o interactive ]] && print -z -- "$cmd"
+  [[ -o interactive ]] || return 0
+  mode="$(_err_suggest_mode)"
+  case "$mode" in
+    off) return 0 ;;
+    ask|buffer) print -z -- "$cmd" ;;
+    *)
+      # No duplicate if that command is already the newest history entry.
+      local prev
+      prev="$(builtin fc -ln -1 2>/dev/null | sed 's/^[[:space:]]*//')"
+      [[ "$prev" == "$cmd" ]] || print -s "$cmd"
+      ;;
+  esac
   return 0
 }
 

@@ -100,6 +100,17 @@ for c in "ls -la" "git status" "echo err" "echo errc" "noglob ls"; do
   _check no "$(_err_is_ours "$c" && echo yes || echo no)" "not ours: $c"
 done
 
+print "sensible defaults from err.conf"
+_check "history" "$(_err_suggest_mode)" "suggest = history (↑ recalls, no auto-fill)"
+_saved_dir="$_ERR_DIR"
+_tmpdir=$(mktemp -d)
+for _v in off ask history; do
+  print "suggest = $_v" > "$_tmpdir/err.conf"
+  _ERR_DIR="$_tmpdir"
+  _check "$_v" "$(_err_suggest_mode)" "suggest = $_v parsed"
+done
+_ERR_DIR="$_saved_dir"; rm -rf "$_tmpdir"
+
 print 're-sourcing (the `reload` alias sources ~/.zshrc again)'
 _reload_out=$(zsh -f -c "source '$_ERR_DIR/err-launcher.zsh'; source '$_ERR_DIR/err-launcher.zsh'; print ok" 2>&1)
 _check "ok" "$_reload_out" "second source parses and runs"
