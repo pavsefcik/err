@@ -203,6 +203,19 @@ def main():
         check(not os.path.isfile(session_file(sid)), "confirmed delete left files")
         ok("delete confirm")
 
+        # Alias expansion: a pre-seeded cache must be used without rebuilding
+        # (with backend=mlx it used to never be built, so aliases were explained
+        # as unrelated commands).
+        cache = errmod.shell_config_cache_path()
+        with open(cache, "w") as f:
+            json.dump({"aliases": {"ports": "lsof -i -P -n | grep LISTEN"},
+                       "functions": {"lk": "uv run lk $@"}}, f)
+        check(errmod.shell_defn("ports -i") == "alias: lsof -i -P -n | grep LISTEN",
+              "alias expansion from the cache")
+        check(errmod.shell_defn("lk foo").startswith("function:"),
+              "function expansion from the cache")
+        ok("shell alias/function expansion")
+
         # Explain turns persist the command line as the session title; it must
         # be redacted like everything else (the title is what `err resume` shows).
         secret = "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"

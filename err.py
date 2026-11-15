@@ -359,8 +359,35 @@ def load_shell_config() -> dict:
         return {}
 
 
+SHELL_CONFIG_TTL = 3600  # seconds; also rebuilt when ~/.zshrc is newer
+
+
+def ensure_shell_config_cache() -> None:
+    """Make sure the alias/function dump exists and is not stale.
+
+    It used to be built only when err started the fm server, so with
+    `backend = mlx` it was never built at all and err explained the user's
+    aliases as if they were unrelated commands (`ports` -> "MacPorts").
+    """
+    path = shell_config_cache_path()
+    try:
+        built_at = os.path.getmtime(path)
+    except OSError:
+        built_at = 0.0
+    newest_rc = 0.0
+    for rc in ("~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.bashrc", "~/.bash_profile"):
+        try:
+            newest_rc = max(newest_rc, os.path.getmtime(os.path.expanduser(rc)))
+        except OSError:
+            pass
+    fresh = built_at > 0         and (time.time() - built_at) < SHELL_CONFIG_TTL         and built_at >= newest_rc
+    if not fresh:
+        build_shell_config_cache()
+
+
 def shell_defn(cmd: str) -> str:
     first = cmd.split()[0] if cmd.split() else cmd
+    ensure_shell_config_cache()
     cfg = load_shell_config()
     aliases = cfg.get("aliases", {})
     functions = cfg.get("functions", {})

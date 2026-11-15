@@ -191,12 +191,21 @@ _out=$(cmd_out 'err clean --all --dry-run')
 contains "dry run" "$_out" "err clean --dry-run refuses to delete"
 [[ -d "$ERR_STATE_DIR" ]] && ok "err clean --dry-run left the state dir alone"
 
-_out=$(cmd_out 'err status --json; print "RC=$?"')
-contains "null" "$_out" "status --json is null when nothing serves :11500"
-contains "RC=1" "$_out" "status --json exits 1 when nothing is running"
-
-_out=$(cmd_out 'err endpoint; print "RC=$?"')
-contains "no model running" "$_out" "err endpoint says when nothing is running"
+# :11500 is machine-global, so this adapts: on a host that already serves a
+# model the shape is asserted instead of the "nothing running" wording.
+if lsof -nP -iTCP:11500 -sTCP:LISTEN -t >/dev/null 2>&1; then
+  _out=$(cmd_out 'err status --json; print "RC=$?"')
+  contains '"base_url"' "$_out" "status --json exposes a base_url"
+  contains '"model"' "$_out" "status --json exposes the model"
+  _out=$(cmd_out 'err endpoint; print "RC=$?"')
+  contains "http://127.0.0.1:11500/v1" "$_out" "err endpoint prints the base URL"
+else
+  _out=$(cmd_out 'err status --json; print "RC=$?"')
+  contains "null" "$_out" "status --json is null when nothing serves :11500"
+  contains "RC=1" "$_out" "status --json exits 1 when nothing is running"
+  _out=$(cmd_out 'err endpoint; print "RC=$?"')
+  contains "no model running" "$_out" "err endpoint says when nothing is running"
+fi
 
 _out=$(cmd_out "err help | grep -m1 'err v0.601.0'")
 contains "err v0.601.0" "$_out" "err help prints the banner"
