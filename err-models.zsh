@@ -486,10 +486,6 @@ CFG
     _err_reload_config
   }
 
-  _err_open_models_folder() {
-    open "$hub_dir"
-  }
-
   _err_open_chat_folder() {
     open "$chat_dir"
   }
@@ -2101,6 +2097,9 @@ PY
       if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
         print "err: ready $_ERR_FM_ID on :$port"
         print "  endpoint: http://127.0.0.1:$port/v1"
+        # One place arms the idle watchdog (err.py owns the logic); without it
+        # an engine-started fm server never shuts down.
+        python3 "$_ERR_SRC_DIR/err.py" --watchdog "$pid" >/dev/null 2>&1 &
         _err_note_last_model "$_ERR_FM_ID"
         return 0
       fi

@@ -77,6 +77,10 @@ cache, never there.
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
+- **One place starts `fm serve`.** `err.py:ensure_running` and the engine's
+  `_err_fm_start` both can; whoever starts it arms the idle watchdog via
+  `python3 err.py --watchdog <pid>`, and engine paths touch
+  `$ERR_STATE_DIR/fm_heartbeat` so a live server is never reaped.
 - **Quotes in an associative-array subscript are part of the key.** `M["$k"]=v`
   stores the key `"v"` *with quotes*; `${M[$k]}` then misses. This silently
   broke **every** menu selection for a while (rows rendered, choice discarded,

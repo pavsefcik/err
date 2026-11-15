@@ -976,6 +976,16 @@ def cmd_delete() -> None:
 def main() -> None:
     args = sys.argv[1:]
 
+    # Internal: arm the idle watchdog for an already-running fm server. Used by
+    # the engine's `err run apple-fm`, which starts fm itself and would
+    # otherwise hold the model forever.
+    if len(args) == 2 and args[0] == "--watchdog":
+        try:
+            spawn_idle_watchdog(int(args[1]))
+        except (TypeError, ValueError):
+            return
+        return
+
     if args and args[0] in ("-h", "--help"):
         # The launcher owns the help screen; err.py is internal.
         print("err: see `err help` (err.py is the explain/ask engine, not the CLI)")

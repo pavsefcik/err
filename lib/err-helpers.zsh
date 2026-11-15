@@ -185,10 +185,6 @@ EOF_YMLX
 # Print a line on the NORMAL screen, leaving the alt buffer first so it stays
 # visible in scrollback after err exits (rather than being swallowed with the
 # alt screen).
-_err_print_normal() {
-  _err_tui_leave
-  print -r -- "$@"
-}
 
 # CLI help. Lives here (not inside err()) so the --help fast path can print it
 # before any of the TUI helpers are defined.

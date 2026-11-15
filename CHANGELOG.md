@@ -38,6 +38,14 @@ All notable changes to err are documented here. Format follows
 
 err and marv-mlx are now one tool.
 
+### Added
+
+- `err doctor` — one pass/warn/fail line per subsystem (config, python, launcher
+  freshness, state, default model, the backend's server, tools, disk, scratch
+  files), each with the command that fixes it.
+- `tests/smoke.zsh` (end to end through the launcher) and `tests/menu.zsh`
+  (the real picker driven by a fake `gum`).
+
 ### Changed
 
 - Bare `err` prints the help screen instead of explaining the last command.

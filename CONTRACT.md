@@ -133,7 +133,11 @@ suggest        = ask | history | off (what to do with the recommended command)
  "tokens":0}
 ```
 
-* `title` — first question, truncated to 60 chars, used by `err resume`.
+* `title` — first line of the session, redacted, truncated to 60 chars, shown by
+  `err resume`. For an explain turn it is `explain: <command>`; for an ask turn
+  it is the question. (`turns[].q` follows the same split: the question for ask
+  turns, the whole `Command: … / Exit code: … / <prompt>` block for explain
+  turns.) The title is redacted like every other persisted field.
 * `turns` — written **only** after a redaction pass (`[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=`,
   `ghp_…`, `sk-…`, `Bearer …` → `«redacted»`).
 * Pruned: > 7 days old or > 50 sessions, oldest first.
