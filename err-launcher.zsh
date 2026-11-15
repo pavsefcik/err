@@ -214,6 +214,13 @@ fi
 
 # ── the command ───────────────────────────────────────────────────────
 
+# The alias at the bottom of this file turns `err` into `noglob err`. Without
+# dropping it first, re-sourcing (`source ~/.zshrc`, the `reload` alias) parses
+# the next line as `noglob err() {` and dies with "defining function based on
+# alias". Aliases are expanded at parse time, so this must run before the
+# definition below.
+unalias err 2>/dev/null || true
+
 err() {
   local last_cmd="$_err_last_cmd"
   local last_exit="$_err_last_exit"

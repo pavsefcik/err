@@ -81,6 +81,12 @@ for c in "ls -la" "git status" "echo err" "echo errc" "noglob ls"; do
   _check no "$(_err_is_ours "$c" && echo yes || echo no)" "not ours: $c"
 done
 
+print "re-sourcing (the `reload` alias sources ~/.zshrc again)"
+_reload_out=$(zsh -f -c "source '$_ERR_DIR/err-launcher.zsh'; source '$_ERR_DIR/err-launcher.zsh'; print ok" 2>&1)
+_check "ok" "$_reload_out" "second source parses and runs"
+_reload_hooks=$(zsh -f -c "source '$_ERR_DIR/err-launcher.zsh'; source '$_ERR_DIR/err-launcher.zsh'; print \${#preexec_functions} \${#precmd_functions}" 2>&1)
+_check "1 1" "$_reload_hooks" "hooks are not duplicated"
+
 print ""
 if (( _FAILS )); then
   print "FAILED: $_FAILS"
