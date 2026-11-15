@@ -2487,7 +2487,12 @@ PY
     spec=$(_err_thinking_spec "$model" "$hub_dir")
     control="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
     markers="${spec%%$'\t'*}"; rf="${spec#*$'\t'}"
-    [[ -d "$folder" ]] && size_kb=$(du -sk "$folder" 2>/dev/null | awk '{print $1}')
+    # Measure the snapshot tree with symlinks followed: a hub model dir holds
+    # `snapshots/…` links into `blobs/`, so `du` on the dir reports a few MB for
+    # a multi-GB model. Following snapshots counts each weight file once.
+    local size_target="$folder/snapshots"
+    [[ -d "$size_target" ]] || size_target="$folder"
+    [[ -d "$folder" ]] && size_kb=$(du -skL "$size_target" 2>/dev/null | awk '{print $1}')
     local installed=false
     [[ -d "$folder" ]] && installed=true
     if (( json )); then
@@ -2501,7 +2506,7 @@ PY
       print "Family:     $family"
       print "Thinking:   control=$control markers=$markers reasoning-first=$([[ "$rf" == 1 ]] && echo yes || echo no)"
       print "Path:       $folder"
-      (( size_kb > 0 )) && print "Size:       $(du -sh "$folder" 2>/dev/null | awk '{print $1}')"
+      (( size_kb > 0 )) && print "Size:       $(_err_fmt_bytes $(( size_kb * 1024 )) 2>/dev/null)  (weights, symlinks followed)"
     fi
     return 0
   }

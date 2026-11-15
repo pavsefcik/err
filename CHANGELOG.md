@@ -25,6 +25,9 @@ err and marv-mlx are now one tool.
 - Menu rows line up: the default marker is ASCII `*`, not a double-width `★`,
   which shifted every row under it.
 
+- **`err info` reports real model size.** It measured the model directory, which
+  holds `snapshots/…` symlinks into `blobs/` — so a 2.9 GiB model showed as
+  6.5 MB. It now follows snapshots and counts each weight file once.
 - **err has its own state root.** `~/.cache/err` instead of borrowing marv-mlx's
   `~/.cache/marv/mlx`; `~/.cache/marv` is left to the marv harness. First run
   copies err's own files across (config, chats, sessions, catalog) and leaves
