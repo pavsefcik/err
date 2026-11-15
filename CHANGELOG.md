@@ -33,6 +33,11 @@ err and marv-mlx are now one tool.
   and only when the word stands alone — `err why did that fail` is still a
   question. `errc` is unaffected: it calls the explainer directly.
 - The help screen carries the tagline: *TO ERR IS HUMAN.*
+- `err runs [<model>]` starts an **additional** server on the next free port
+  from `:11501`–`:11509`, leaving whatever serves `:11500` untouched (for
+  comparing two models, or serving one to another app while err keeps its own).
+  `err status` lists every server; `err endpoint` and `--json` still report
+  `:11500` only, because that is the port clients are pointed at.
 - `err swap <model>` is a synonym for `err switch` (same menu, same backend
   repoint).
 - A suggested command is no longer dropped straight into the prompt buffer. It

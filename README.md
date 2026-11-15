@@ -44,6 +44,7 @@ TO ERR IS HUMAN.
   err switch | swap <model>  switch to another model
   err default <model>        set model as default
   err run <model>            start a model on port 11500
+  err runs <model>           start an extra model on :11501+ (keeps :11500)
   err stop <model>           stop a running model (default: all)
   err tui                    interactive TUI (browse / run / download)
   err list                   list installed models err can serve

@@ -42,7 +42,7 @@ over free text** — `err run` is the model verb, never the question "run".
 | `err what` · `err why` · `err wtf` (hidden) | `err.py` (explain last command) |
 | `err <anything else>` | `err.py --ask "<text>"` |
 | `err new` · `clear` `-c` · `resume [n]` · `delete` | `err.py` (session verbs) |
-| `err chat` `switch` `swap` `default` `run` `stop` `tui` `list` `curated` `download` `remove` `settings` `info` `cache` `clean` `uninstall` `endpoint` `status` | `err-models.zsh` (same verb, same args) |
+| `err chat` `switch` `swap` `default` `run` `runs` `run` `stop` `tui` `list` `curated` `download` `remove` `settings` `info` `cache` `clean` `uninstall` `endpoint` `status` | `err-models.zsh` (same verb, same args) |
 | `ensure <model>` | `err-models.zsh`, **hidden** — called by err.py, never by a user |
 | `err version` `-v` `--version` | launcher prints `VERSION` |
 | `err help` `-h` `--help` | launcher prints the menu |

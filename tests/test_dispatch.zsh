@@ -33,7 +33,7 @@ _err_last_cmd="lsof -ti:3000"
 _err_last_exit=1
 
 print "model verbs -> engine"
-for v in run switch swap default stop status tui list curated download remove settings info cache clean uninstall endpoint; do
+for v in run runs switch swap default stop status tui list curated download remove settings info cache clean uninstall endpoint; do
   _CALLS=()
   err $v >/dev/null 2>&1
   _check "engine:$v" "${_CALLS[1]:-}" "err $v"

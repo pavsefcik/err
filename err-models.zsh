@@ -2000,16 +2000,16 @@ PY
   }
 
   _err_headless_launch() {
-    local model="$1"
+    local model="$1" want_port="${2:-11500}"
     local unsupported
     if unsupported=$(_err_model_unsupported_reason "$model" "$hub_dir"); then
       print -u2 "err: $model can't be served — $unsupported."
       print -u2 "MLX-quantized repos run directly (e.g. mlx-community/…-4bit)."
       return 1
     fi
-    local port=11500
+    local port="$want_port"
     if ! _err_port_free "$port"; then
-      print -u2 "err: port 11500 is busy — stop the running model first (err stop)"
+      print -u2 "err: port $port is busy — stop the running model first (err stop)"
       return 1
     fi
     local safe="${model//\//_}"
@@ -2308,6 +2308,46 @@ PY
     return $rc
   }
 
+  # err runs [<model>] — an ADDITIONAL server on :11501+:11509, next to
+  # whatever already serves :11500. Never stops or replaces anything.
+  _err_headless_runs() {
+    local model="${1:-}" port
+    if [[ -z "$model" ]]; then
+      model=$(_err_pick_installed "Start which additional model?") || return 1
+    fi
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      # fm is a singleton on its own port; a second copy isn't a thing.
+      print -u2 "err: $model is a single on-device server — use 'err run $_ERR_FM_ID'"
+      return 2
+    fi
+    local pid rport rmodel
+    while IFS=$'\t' read -r pid rport rmodel; do
+      if [[ "$rmodel" == "$model" ]]; then
+        print "err: $model already running on :$rport (pid $pid)"
+        return 0
+      fi
+    done < <(_err_running)
+    for port in {11501..11509}; do
+      _err_port_free "$port" && break
+      port=""
+    done
+    if [[ -z "$port" ]]; then
+      print -u2 "err: ports :11501–:11509 are all busy — err stop something first"
+      return 1
+    fi
+    if _err_model_supported "$model" "$hub_dir" \
+       && [[ ! -d "$hub_dir/models--${model//\//--}/snapshots" ]]; then
+      print -u2 "err: downloading $model first (no local snapshot)…"
+      _err_snapshot_download "$model" || {
+        print -u2 "err: download failed for $model"
+        return 1
+      }
+    fi
+    _err_headless_launch "$model" "$port" || return $?
+    print "  endpoint: http://127.0.0.1:$port/v1   (err itself still uses :11500)"
+    return 0
+  }
+
   _err_headless_stop() {
     local want="${1:-}"
     # err stop            -> every err server (11500–11509); the common case
@@ -2528,10 +2568,24 @@ PY
         # Unchanged shape: pi and other clients parse exactly this.
         printf '{"model":"%s","port":%s,"pid":%s,"base_url":"http://127.0.0.1:%s/v1"}\n' \
           "$(_err_json_escape "$cur")" "$port" "$pid" "$port"
-      else
-        print "$cur\t:$port\tpid $pid"
+        return 0
       fi
+      # Human output also lists extra servers started with `err runs`.
+      local ap aq am
+      while IFS=$'\t' read -r ap aq am; do
+        [[ -n "$ap" ]] || continue
+        print "$am\t:$aq\tpid $ap"
+        any=1
+      done < <(_err_running)
       return 0
+    fi
+    if (( ! json )); then
+      local ep eq em
+      while IFS=$'\t' read -r ep eq em; do
+        [[ -n "$ep" ]] || continue
+        print "$em\t:$eq\tpid $ep"
+        any=1
+      done < <(_err_running)
     fi
     if (( json )); then print 'null'; else (( any )) || print "none"; fi
     (( any )) && return 0
@@ -2804,6 +2858,7 @@ PY
     [[ "$_sub" == chat ]] || trap - EXIT INT TERM HUP
     case "$_sub" in
       run|serve)  _err_headless_run      "$@" ;;
+      runs)       _err_headless_runs     "$@" ;;
       chat)       _err_headless_chat     "$@" ;;
       switch|swap) _err_headless_switch  "$@" ;;
       # Hidden: err.py's autostart path (see _err_headless_ensure). Not in

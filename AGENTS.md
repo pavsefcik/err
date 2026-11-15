@@ -84,6 +84,10 @@ cache, never there.
   Sending it to the :11500 server makes mlx-vlm try to download a repo named
   `system`. `mlx_model_id()` resolves the served model from `last-model` /
   `default-model`, so the manager and the explain layer cannot drift again.
+- **Ports are a contract.** `err run`/`err switch` own `:11500` (every client,
+  including err's own `backend = mlx`, reads that). `err runs` takes the next
+  free port from `:11501` and must never move or stop the `:11500` server.
+  `status --json` and `endpoint` deliberately ignore the extra servers.
 - **The chosen model must reach the explain layer.** `err default` / `err switch`
   write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from

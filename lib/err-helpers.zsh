@@ -199,6 +199,7 @@ err — local MLX model manager + OpenAI-compatible server on :11500
 Usage:
   err tui                    interactive TUI (browse / run / download)
   err run [<model>]          start a model on :11500 (detached); no arg = menu
+  err runs [<model>]         start an EXTRA model on :11501+; keeps :11500 as is
   err chat [<model>]         chat with the default/last model, or pick one
   err switch|swap [<model>]  stop :11500 and start another model
   err default [<model>]      set the model `run`/`chat` prefer
