@@ -43,8 +43,35 @@ CFG = load_config()
 PORT = CFG.get("port", "8080")
 MLX_HOST = f"http://127.0.0.1:{PORT}"
 IDLE_TIMEOUT_MIN = float(CFG.get("idle_timeout_minutes", "10"))
-HEARTBEAT_FILE = "/tmp/err_last_use"
-SHELL_CONFIG_CACHE = "/tmp/err_shellconfig"
+# Everything err writes lives under one root and one uid: a fixed
+# /tmp/err_shellconfig is world-readable and lets another user pre-create it.
+_STATE = None
+
+
+def _state_root() -> str:
+    global _STATE
+    if _STATE is None:
+        _STATE = os.path.abspath(os.path.expanduser(
+            os.environ.get("ERR_STATE_DIR") or "~/.cache/err"))
+        os.makedirs(_STATE, exist_ok=True)
+    return _STATE
+
+
+HEARTBEAT_FILE = ""     # unused directly: see heartbeat_file()
+
+
+def heartbeat_file() -> str:
+    return os.path.join(_state_root(), "fm_heartbeat")
+
+
+def fm_log_path() -> str:
+    path = os.path.join(_state_root(), "logs")
+    os.makedirs(path, exist_ok=True)
+    return os.path.join(path, "fm.log")
+
+
+def shell_config_cache_path() -> str:
+    return os.path.join(_state_root(), "shellconfig.json")
 SHELL_CONFIG_MARKER = "@@FUNCTIONS@@"
 FUNC_BODY_LIMIT = 300
 
@@ -54,35 +81,6 @@ SUGGEST_BYTE_LIMIT = 400
 
 # ── help ────────────────────────────────────────────────────────────
 
-HELP = """\
-
-ERR 0.601 // explains the last command, answers questions, keeps sessions
-
-Usage:
-  err                  Explain the last command
-  err <question>       Ask a shell/CLI question
-  err new              Start a fresh session
-  err clear | err -c   Clear the current session (keep its id)
-  err resume [n]       List sessions, or resume session number n
-  err delete           Delete all sessions (asks once)
-  errc <cmd...>        Run <cmd>, capture stderr, then auto-explain
-  err -h|--help        Show this help
-
-Exit codes explained:
-  1     General error (catchall)
-  2     Misuse of shell builtin
-  126   Command found but not executable (permission denied)
-  127   Command not found (typo, not installed, not in PATH)
-  128   Invalid exit argument
-  128+N Killed by signal N (e.g. 130 = Ctrl-C, 137 = SIGKILL, 139 = segfault)
-  255   Exit status out of range
-
-How it works:
-  Run a command, then type `err`. It sends the command and exit code
-  to a model server and streams a short explanation. Optionally capture
-  stderr: some-cmd 2>/tmp/err_stderr; err
-
-"""
 
 # ── fm server management ────────────────────────────────────────
 
@@ -98,7 +96,7 @@ def health_ok(base_url: str = MLX_HOST) -> bool:
 
 def touch_heartbeat() -> None:
     try:
-        with open(HEARTBEAT_FILE, "w") as f:
+        with open(heartbeat_file(), "w") as f:
             f.write(str(time.time()))
     except OSError:
         pass
@@ -108,7 +106,7 @@ def spawn_idle_watchdog(server_pid: int) -> None:
     watchdog = (
         "import os, sys, time, signal\n"
         f"pid={server_pid}\n"
-        f"hb={HEARTBEAT_FILE!r}\n"
+        f"hb={heartbeat_file()!r}\n"
         f"timeout={IDLE_TIMEOUT_MIN}*60\n"
         "while True:\n"
         "    time.sleep(30)\n"
@@ -132,12 +130,13 @@ def spawn_idle_watchdog(server_pid: int) -> None:
 def ensure_running() -> bool:
     if health_ok():
         touch_heartbeat()
-        if not os.path.isfile(SHELL_CONFIG_CACHE):
+        if not os.path.isfile(shell_config_cache_path()):
             build_shell_config_cache()
         return True
 
     print("🚀 Starting Apple Foundation Models server...")
-    log = open("/tmp/fm_server.log", "w")
+    log_path = fm_log_path()
+    log = open(log_path, "w")
 
     cmd = [
         "fm", "serve",
@@ -156,7 +155,7 @@ def ensure_running() -> bool:
             spawn_idle_watchdog(proc.pid)
             return True
 
-    print("❌ fm server failed to start. Check /tmp/fm_server.log", file=sys.stderr)
+    print(f"❌ fm server failed to start. Check {log_path}", file=sys.stderr)
     return False
 
 
@@ -173,6 +172,20 @@ def mlx_base_url() -> str:
 
 
 FM_MODEL_IDS = ("apple-fm", "system", "pcc")
+
+
+def _cfg_int(key: str, default: int) -> int:
+    try:
+        return int(str(CFG.get(key, default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _cfg_float(key: str, default: float) -> float:
+    try:
+        return float(str(CFG.get(key, default)).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def mlx_model_id() -> str:
@@ -331,7 +344,7 @@ def build_shell_config_cache() -> None:
         return
     aliases, functions = parse_shell_config(dump)
     try:
-        with open(SHELL_CONFIG_CACHE, "w") as f:
+        with open(shell_config_cache_path(), "w") as f:
             json.dump({"aliases": aliases, "functions": functions}, f)
     except OSError:
         pass
@@ -339,7 +352,7 @@ def build_shell_config_cache() -> None:
 
 def load_shell_config() -> dict:
     try:
-        with open(SHELL_CONFIG_CACHE) as f:
+        with open(shell_config_cache_path()) as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
@@ -578,7 +591,9 @@ def record_turn(sid: str, user_content: str, answer: str, cmd: str, exit_code: i
     a = redact(answer)
     c = redact(cmd)
     if not sess.get("turns") and not sess.get("title"):
-        sess["title"] = (title or _session_title(user_content, c))[:60]
+        # `title` is caller-supplied from the RAW command/question (see the
+        # callers), so it must go through the same redaction as the turn.
+        sess["title"] = redact(title or _session_title(user_content, c))[:60]
     sess["turns"].append({"q": q, "a": a, "cmd": c, "exit": exit_code, "tokens": tokens})
     sess["tokens"] = _safe_int(sess.get("tokens", 0)) + tokens
     sess["last_used"] = int(time.time())
@@ -603,7 +618,7 @@ def first_fenced_line(text: str):
 
 
 def suggest_mode() -> str:
-    return (os.environ.get("ERR_SUGGEST") or CFG.get("suggest", "ask")).strip().lower()
+    return (os.environ.get("ERR_SUGGEST") or CFG.get("suggest", "history")).strip().lower()
 
 
 def clear_suggest_file() -> None:
@@ -649,8 +664,8 @@ def stream_chat(messages: list, base_url: str, model_id: str) -> tuple:
     payload = json.dumps(
         {
             "model": model_id,
-            "max_tokens": int(CFG["max_tokens"]),
-            "temperature": float(CFG["temperature"]),
+            "max_tokens": _cfg_int("max_tokens", 200),
+            "temperature": _cfg_float("temperature", 0.3),
             "top_p": 0.8,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -749,13 +764,16 @@ def build_explain_user(cmd: str, exit_code: int, stderr_content: str) -> str:
 
     lines.append("")
     if exit_code == 0:
-        lines.append(CFG["prompt_success"])
+        lines.append(CFG.get("prompt_success", "Explain in one short sentence what running it did."))
     elif exit_code < 0:
         lines.append(CFG.get("prompt_unknown", ""))
     elif exit_code == 127:
-        lines.append(CFG.get("prompt_not_found", CFG["prompt_fail"]))
+        lines.append(CFG.get("prompt_not_found")
+                     or CFG.get("prompt_fail")
+                     or "In one or two short sentences, explain what went wrong.")
     else:
-        lines.append(CFG["prompt_fail"])
+        lines.append(CFG.get("prompt_fail")
+                     or "In one or two short sentences, explain what went wrong.")
 
     return "\n".join(lines)
 
@@ -780,7 +798,7 @@ def run_explain() -> None:
     base_url, model_id = prepare_backend()
 
     stderr_content = ""
-    stderr_file = os.environ.get("_ERR_STDERR_FILE", "/tmp/err_stderr")
+    stderr_file = os.environ.get("_ERR_STDERR_FILE", "")
     if exit_code > 0 and os.path.isfile(stderr_file) and os.path.getsize(stderr_file) > 0:
         with open(stderr_file) as f:
             stderr_content = f.read()
@@ -853,6 +871,7 @@ def cmd_clear() -> None:
     sess = load_session(sid) or default_session(sid)
     sess["turns"] = []
     sess["title"] = ""
+    sess["tokens"] = 0
     sess["last_used"] = int(time.time())
     save_session(sess)
 
@@ -931,7 +950,8 @@ def main() -> None:
     args = sys.argv[1:]
 
     if args and args[0] in ("-h", "--help"):
-        print(HELP)
+        # The launcher owns the help screen; err.py is internal.
+        print("err: see `err help` (err.py is the explain/ask engine, not the CLI)")
         return
 
     prune_sessions()

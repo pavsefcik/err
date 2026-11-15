@@ -13,6 +13,7 @@ export _ERR_DIR
 # err's own state root. Deliberately NOT ~/.cache/marv (that belongs to the
 # marv harness and its embedded launches); override with ERR_STATE_DIR.
 : "${ERR_STATE_DIR:=$HOME/.cache/err}"
+ERR_STATE_DIR="${ERR_STATE_DIR:A}"      # absolute, ~ expanded, no trailing /
 export ERR_STATE_DIR
 
 # One-time move of err's state out of the old shared marv-mlx root. Only err's
@@ -34,9 +35,12 @@ fi
 if [[ -z "${_ERR_SESSION_ID:-}" ]]; then
   if command -v uuidgen >/dev/null 2>&1; then
     _ERR_SESSION_ID="$(uuidgen)"
-  else
-    _ERR_SESSION_ID="$$-${EPOCHSECONDS}-$RANDOM"
+  elif command -v python3 >/dev/null 2>&1; then
+    # err.py only accepts a real uuid; a made-up id would make it mint a new
+    # one per call and lose the conversation.
+    _ERR_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)"
   fi
+  : "${_ERR_SESSION_ID:=}"
 fi
 export _ERR_SESSION_ID
 
@@ -124,7 +128,7 @@ TO ERR IS HUMAN.
   err "<question>"           ask a command-related or any other question
   err new                    start a fresh session (old one stays resumable)
   err clear | -c             clear the current session, keep the id
-  err resume                 resume a previous session
+  err resume [n]             list sessions, or resume session number n
   err delete                 delete all sessions
   err status                 show what is running
   err chat <model>           start a model and open the built-in interactive chat
@@ -141,7 +145,8 @@ TO ERR IS HUMAN.
   err settings               basic and advanced model settings
   err info <model>           show details for a model (size, family, thinking)
   err cache                  show on-disk footprint (APC, logs, hub, tool env)
-  err clean                  delete regenerable caches (never model weights)
+  err clean --apc|--logs|--venvs|--all
+                             delete regenerable caches (never model weights)
   err uninstall              remove err from your system
   err endpoint               print the base URL / model of the running server
   err doctor                 check the install: config, backends, server, disk
@@ -161,8 +166,12 @@ USAGE
 # ── engine bridge ─────────────────────────────────────────────────────
 
 # Verbs served by the ported marv-mlx engine.
-_err_engine_verbs=(chat switch swap default run runs stop status doctor tui list ls curated
-  download remove settings info cache clean uninstall endpoint)
+_err_engine_verbs=(
+  # model manager (every `case` arm in err-models.zsh that a user can type)
+  chat switch swap default run runs serve stop status doctor tui menu
+  list ls curated curator download remove rm settings config
+  info cache clean uninstall ensure endpoint set-default
+)
 
 _err_engine() {
   if [[ ! -f "$_ERR_DIR/err-models.zsh" ]]; then
@@ -190,7 +199,6 @@ _err_py() {
   _ERR_TOKENS_FILE="$_ERR_TOKENS_FILE" \
   _ERR_SUGGEST_FILE="$_ERR_SUGGEST_FILE" \
   _ERR_STDERR_FILE="$_ERR_STDERR_FILE" \
-  _ERR_STATE_DIR="$ERR_STATE_DIR" \
     "$py" "$_ERR_DIR/err.py" "$@"
   local rc=$?
 
@@ -213,6 +221,8 @@ _err_py() {
 #   ask                drop straight into the prompt buffer (print -z)
 #   off                don't offer the command at all
 _err_suggest_mode() {
+  # same precedence as err.py: ERR_SUGGEST, then err.conf, then history
+  if [[ -n "${ERR_SUGGEST:-}" ]]; then print -r -- "${ERR_SUGGEST:l}"; return; fi
   local v="" conf="${ERR_CONF:-$_ERR_DIR/err.conf}"
   [[ -r "$conf" ]] && v=$(grep -E '^[[:space:]]*suggest[[:space:]]*=' \
     "$conf" 2>/dev/null | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
@@ -322,7 +332,7 @@ err() {
     fi
   done
   case "$verb" in
-    version|-v|--version) _err_version; return 0 ;;
+    version|-v|-V|--version) _err_version; return 0 ;;
     help|-h|--help)       _err_help;    return 0 ;;
   esac
 
@@ -333,7 +343,7 @@ err() {
       local rc=$?
       case "$verb" in
         new)  _ERR_TURNS=0; _ERR_TOKENS=0 ;;
-        clear|-c) _ERR_TURNS=0 ;;
+        clear|-c) _ERR_TURNS=0; _ERR_TOKENS=0 ;;
         resume) _ERR_TURNS=1 ;;   # resumed sessions start non-empty
       esac
       _err_update_rprompt
@@ -406,6 +416,12 @@ _err_explain() {
 errc() {
   "$@" 2> >(tee "$_ERR_STDERR_FILE" >&2)
   local rc=$?
+  # The tee is a separate process: for a fast failure it can still be flushing
+  # when err.py opens the file, which turns "Error output: …" into "none".
+  if (( rc != 0 )) && [[ ! -s "$_ERR_STDERR_FILE" ]]; then
+    local _i
+    for _i in {1..30}; do [[ -s "$_ERR_STDERR_FILE" ]] && break; sleep 0.01; done
+  fi
   _err_last_exit=$rc
   _err_last_cmd="$*"
   _err_skip_exit=1

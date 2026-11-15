@@ -28,12 +28,11 @@ _err_py()     { _CALLS=( "py:$*" ) }
 _err_version() { _CALLS=( "version" ) }
 _err_help()    { _CALLS=( "help" ) }
 _err_take_suggestion() { : }
-_err_update_rprompt()  { : }
 _err_last_cmd="lsof -ti:3000"
 _err_last_exit=1
 
 print "model verbs -> engine"
-for v in run runs switch swap default stop status tui list curated download remove settings info cache clean uninstall endpoint; do
+for v in "${_err_engine_verbs[@]}"; do
   _CALLS=()
   err $v >/dev/null 2>&1
   _check "engine:$v" "${_CALLS[1]:-}" "err $v"
@@ -99,6 +98,35 @@ done
 for c in "ls -la" "git status" "echo err" "echo errc" "noglob ls"; do
   _check no "$(_err_is_ours "$c" && echo yes || echo no)" "not ours: $c"
 done
+
+print "suggestion channel never executes"
+_sug_tmp=$(mktemp -d)
+_sug_file="$_sug_tmp/suggest"
+_sug_canary="$_sug_tmp/PWNED"
+print -r -- "touch $_sug_canary" > "$_sug_file"
+_ERR_SUGGEST_FILE="$_sug_file"
+# history mode (default): the line must be appended to history, not run
+_err_take_suggestion
+_check "no" "$([[ -e "$_sug_canary" ]] && echo yes || echo no)" "a suggested 'touch' was not executed"
+_check "no" "$([[ -e "$_sug_canary" ]] && echo yes || echo no)" "and still was not executed after the second pass"
+_check "yes" "$([[ -s "$_sug_file" ]] && echo yes || echo no)" "history mode consumes the suggestion file"
+# off mode: nothing is consumed at all
+print -r -- "touch $_sug_canary" > "$_sug_file"
+_saved_suggest="${ERR_SUGGEST:-}"; ERR_SUGGEST=off
+_err_take_suggestion
+ERR_SUGGEST="$_saved_suggest"
+_check "yes" "$([[ -s "$_sug_file" ]] && echo yes || echo no)" "suggest=off leaves the file alone"
+remove=(); rm -rf "$_sug_tmp"
+
+print "RPROMPT is not clobbered"
+_saved_rp="mine"; RPROMPT="$_saved_rp"; _ERR_RPROMPT_OWNED=0
+_ERR_TURNS=2; _ERR_TOKENS=10
+_err_update_rprompt
+_check "$_saved_rp" "$RPROMPT" "a user RPROMPT survives err"
+RPROMPT=""; _ERR_RPROMPT_OWNED=0; _err_update_rprompt
+contains_rp="${RPROMPT}"
+_check "yes" "$([[ -n "$contains_rp" ]] && echo yes || echo no)" "an empty RPROMPT gets the turn counter"
+RPROMPT=""
 
 print "sensible defaults from err.conf"
 _check "history" "$(_err_suggest_mode)" "suggest = history (↑ recalls, no auto-fill)"

@@ -16,9 +16,9 @@ typeset -g _ERR_LAST_LAUNCH_PORT=""
 local _ERR_SRC_DIR="${0:A:h}"
 source "$_ERR_SRC_DIR/lib/err-helpers.zsh"
 
-_err_engine() {
+_err_engine_main() {
   local ERR_DEBUG=false
-  local hub_dir="${ERR_HUB_DIR:-$HOME/.cache/huggingface/hub}"
+  local hub_dir="${ERR_HUB_DIR:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
   local state_dir="${ERR_STATE_DIR:-$HOME/.cache/err}"
   local log_dir="$state_dir/logs"
   local config_file="$state_dir/config.zsh"
@@ -2059,7 +2059,8 @@ PY
   typeset -g _ERR_FM_ID="apple-fm"
 
   _err_fm_port() {
-    local f="$_ERR_SRC_DIR/err.conf" p=""
+    local f p=""
+    f=$(_err_conf_path)
     [[ -r "$f" ]] && p=$(grep -E '^[[:space:]]*port[[:space:]]*=' "$f" 2>/dev/null \
       | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -dc '0-9')
     print -r -- "${p:-8080}"
@@ -2069,6 +2070,10 @@ PY
   # unrelated service that happens to own the port).
   _err_fm_running() {
     local port=$(_err_fm_port) pid cmd
+    # Shared with err.py's idle watchdog (state_dir/fm_heartbeat): using err
+    # through the engine must count as activity, or the watchdog SIGTERMs a
+    # perfectly live server mid-conversation.
+    : > "$state_dir/fm_heartbeat" 2>/dev/null
     pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1)
     [[ -n "$pid" ]] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null)
@@ -2696,11 +2701,12 @@ PY
 
     # 7. disk
     local apc_kb cap_gb total_gb
-    apc_kb=$(du -sk "$state_dir/apc" 2>/dev/null | awk '{print $1}'); apc_kb=${apc_kb:-0}
+    local apc_dir="${APC_DISK_PATH:-$state_dir/apc}"
+    apc_kb=$(du -sk "$apc_dir" 2>/dev/null | awk '{print $1}'); apc_kb=${apc_kb:-0}
     cap_gb="${ERR_APC_TOTAL_GB:-6}"
     total_gb=$(( apc_kb / 1024 / 1024 ))
     if (( total_gb > cap_gb )); then
-      row warn disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)" "err clean --apc"
+      row warn disk "prefix cache ${total_gb} GiB at $apc_dir (cap ${cap_gb} GiB)" "err clean --apc"
       (( warnings++ ))
     else
       row ok disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)"
@@ -3053,7 +3059,6 @@ PY
   # pid to _ERR_SESSION_PIDS, and disown it. `chat` and the TUI instead keep
   # their server session-tracked so it dies with them.
   if (( $# > 0 )); then
-    local _ERR_HEADLESS=1
     local _sub="$1"; shift
     # `chat` and TUI keep the EXIT trap; the management verbs don't need it.
     [[ "$_sub" == chat ]] || trap - EXIT INT TERM HUP
@@ -3124,4 +3129,4 @@ _err_cleanup() {
 }
 trap _err_cleanup EXIT INT TERM HUP
 
-_err_engine "$@"
+_err_engine_main "$@"

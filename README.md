@@ -37,7 +37,7 @@ TO ERR IS HUMAN.
   err "<question>"           ask a command-related or any other question
   err new                    start a fresh session (old one stays resumable)
   err clear | -c             clear the current session, keep the id
-  err resume                 resume a previous session
+  err resume [n]             list sessions, or resume session number n
   err delete                 delete all sessions
   err status                 show what is running
   err chat <model>           start a model and open the built-in interactive chat
@@ -54,12 +54,20 @@ TO ERR IS HUMAN.
   err settings               basic and advanced model settings
   err info <model>           show details for a model (size, family, thinking)
   err cache                  show on-disk footprint (APC, logs, hub, tool env)
-  err clean                  delete regenerable caches (never model weights)
+  err clean --apc|--logs|--venvs|--all
+                             delete regenerable caches (never model weights)
   err uninstall              remove err from your system
-  err doctor                 check the install: config, backends, server, disk
   err endpoint               print the base URL / model of the running server
+  err doctor                 check the install: config, backends, server, disk
   err version | -v           show the current version
   err help | -h              show this help (this is also what bare `err` does)
+
+The first word decides the path: the verbs above always win, so a question that
+starts with one of them needs quoting. `what` / `why` explain the last command
+only when they are the whole command — `err why did that fail` is a question.
+err never runs a model-suggested command. It appends it to your shell history,
+so ↑ recalls it and you decide what to do with it — `suggest = ask` in err.conf
+puts it in the prompt buffer instead, `suggest = off` stops offering it.
 ```
 
 ## Explain & ask

@@ -203,6 +203,17 @@ def main():
         check(not os.path.isfile(session_file(sid)), "confirmed delete left files")
         ok("delete confirm")
 
+        # Explain turns persist the command line as the session title; it must
+        # be redacted like everything else (the title is what `err resume` shows).
+        secret = "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        proc = run([], extra={"_ERR_LAST_CMD": secret, "_ERR_LAST_EXIT": "0"})
+        check(proc.returncode == 0, f"explain with a secret failed: {proc.stderr}")
+        with open(session_file(sid)) as f:
+            data = json.load(f)
+        check("ghp_" not in data.get("title", ""), "session title leaked a secret")
+        check("ghp_" not in json.dumps(data), "session file leaked a secret")
+        ok("explain title is redacted")
+
         # The mlx backend must not send err.conf's fm model_id ("system") to the
         # server: mlx-vlm would try to load an HF repo called "system".
         saved_env = {k: os.environ.get(k) for k in ("ERR_STATE_DIR", "ERR_MLX_MODEL")}

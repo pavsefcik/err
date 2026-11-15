@@ -182,7 +182,9 @@ _out=$(cmd_out 'err curated')
 contains "mlx-community/" "$_out" "err curated lists the bundled catalog"
 
 _out=$(cmd_out 'err cache')
-contains "$ERR_STATE_DIR" "$_out" "err cache reports the state dir"
+# the launcher canonicalizes ERR_STATE_DIR (":A"), so /var -> /private/var
+_statedir_real=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$ERR_STATE_DIR")
+contains "$_statedir_real" "$_out" "err cache reports the state dir"
 contains "* = regenerable" "$_out" "err cache explains the regenerable marker"
 
 _out=$(cmd_out 'err clean --all --dry-run')
@@ -199,6 +201,18 @@ contains "no model running" "$_out" "err endpoint says when nothing is running"
 _out=$(cmd_out "err help | grep -m1 'err v0.601.0'")
 contains "err v0.601.0" "$_out" "err help prints the banner"
 check "$(cmd_out 'err help')" "$(cmd_out 'err -h')" "err help and err -h agree"
+
+# The README fenced block is the user-facing copy of `err help`. Drift here is
+# how a documented verb stops existing (or a new one stays invisible).
+_help=$(cmd_out 'err help' | sed '/^[[:space:]]*$/d')
+_readme=$(awk '/^err v0\.601\.0 \/\//{f=1} f{print} /stops offering it\.$/{f=0}' "$REPO/README.md" | sed '/^[[:space:]]*$/d')
+if [[ -z "$_readme" ]]; then
+  fail "README help block found" "no fenced block starting with 'err v0.601.0 //'"
+elif [[ "$_help" == "$_readme" ]]; then
+  ok "README help block matches err help"
+else
+  fail "README help block matches err help" "$(diff <(print -r -- "$_help") <(print -r -- "$_readme") | head -6)"
+fi
 
 # ── 7. a dead backend fails loudly, not silently ──────────────────────
 print "failure modes"
