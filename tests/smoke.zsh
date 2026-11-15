@@ -194,13 +194,25 @@ contains "dry run" "$_out" "err clean --dry-run refuses to delete"
 # :11500 is machine-global, so this adapts: on a host that already serves a
 # model the shape is asserted instead of the "nothing running" wording.
 if lsof -nP -iTCP:11500 -sTCP:LISTEN -t >/dev/null 2>&1; then
-  _out=$(cmd_out 'err status --json; print "RC=$?"')
+  # A delete must be validated before it asks for confirmation.
+_out=$(cmd_out 'err remove no-such-org/nope-xyz; print "RC=$?"')
+contains "not installed" "$_out" "err remove rejects an uninstalled model"
+contains "RC=1" "$_out" "err remove exits 1 for an uninstalled model"
+not_contains "permanently?" "$_out" "err remove does not ask to confirm a no-op"
+
+_out=$(cmd_out 'err status --json; print "RC=$?"')
   contains '"base_url"' "$_out" "status --json exposes a base_url"
   contains '"model"' "$_out" "status --json exposes the model"
   _out=$(cmd_out 'err endpoint; print "RC=$?"')
   contains "http://127.0.0.1:11500/v1" "$_out" "err endpoint prints the base URL"
 else
-  _out=$(cmd_out 'err status --json; print "RC=$?"')
+  # A delete must be validated before it asks for confirmation.
+_out=$(cmd_out 'err remove no-such-org/nope-xyz; print "RC=$?"')
+contains "not installed" "$_out" "err remove rejects an uninstalled model"
+contains "RC=1" "$_out" "err remove exits 1 for an uninstalled model"
+not_contains "permanently?" "$_out" "err remove does not ask to confirm a no-op"
+
+_out=$(cmd_out 'err status --json; print "RC=$?"')
   contains "null" "$_out" "status --json is null when nothing serves :11500"
   contains "RC=1" "$_out" "status --json exits 1 when nothing is running"
   _out=$(cmd_out 'err endpoint; print "RC=$?"')

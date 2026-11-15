@@ -1937,7 +1937,8 @@ PY
     while true; do
       _err_main_read_key
       if [[ -z "$_ERR_MENU_KEY" ]]; then
-        _err_stop_all >/dev/null 2>&1
+        # EOF is not a request to stop anything: the EXIT trap already stops
+        # the servers this TUI started, and `err run` servers must survive.
         _ERR_MENU_QUIT=1
         break
       fi
@@ -2549,17 +2550,32 @@ PY
       [[ -z "$picked" ]] && return 1
       want=( ${(f)picked} )
     fi
-    print "err: this deletes weights from $hub_dir"
-    printf '  %s\n' "${want[@]}"
-    gum confirm "Delete ${#want} model(s) permanently?" || { print "aborted"; return 1; }
+
+    # Validate BEFORE asking: confirming a delete for a model that isn't there
+    # is the kind of prompt that trains people to answer without reading.
+    local -a present=() absent=()
     local model folder rc=0
     for model in "${want[@]}"; do
       folder="$hub_dir/models--${model//\//--}"
-      if [[ -d "$folder" ]]; then
-        rm -rf "$folder" && print "  ✓ removed $model"
+      if [[ -d "$folder" ]]; then present+=( "$model" ); else absent+=( "$model" ); fi
+    done
+    for model in "${absent[@]}"; do
+      print -u2 "err: not installed: $model"
+      rc=1
+    done
+    (( ${#present[@]} )) || return $rc
+
+    print "err: this deletes weights from $hub_dir"
+    printf '  %s\n' "${present[@]}"
+    gum confirm "Delete ${#present} model(s) permanently?" || { print "aborted"; return 1; }
+
+    for model in "${present[@]}"; do
+      folder="$hub_dir/models--${model//\//--}"
+      if rm -rf "$folder" 2>/dev/null; then
+        print "  ✓ removed $model"
         _err_purge_orphan_blobs "$hub_dir" 2>/dev/null
       else
-        print -u2 "  err: not installed: $model"
+        print -u2 "  err: could not remove $model"
         rc=1
       fi
     done
