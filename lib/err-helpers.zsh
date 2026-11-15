@@ -805,7 +805,7 @@ _err_export_apc_env() {
   export APC_ENABLED="${APC_ENABLED:-1}"
   export APC_DISK_ENABLED="${APC_DISK_ENABLED:-1}"
   export APC_DISK_PATH="${APC_DISK_PATH:-$state_dir/apc}"
-  export APC_DISK_MAX_GB="${APC_DISK_MAX_GB:-5}"
+  export APC_DISK_MAX_GB="${APC_DISK_MAX_GB:-2}"
   # Hybrid models (e.g. Qwen3.5's interleaved linear/full attention) cannot be
   # prefix-trimmed like plain K/V, so APC restores whole-cache checkpoints at
   # boundaries. 512 tokens keeps the un-cached suffix short without a large
@@ -853,6 +853,40 @@ _err_install_apc_sitecustomize() {
       cp -f "$src" "$sp/sitecustomize.py" 2>/dev/null || continue
     fi
   done
+  return 0
+}
+
+# _err_apc_sweep [apc_dir]
+# mlx-vlm enforces APC_DISK_MAX_GB PER MODEL DIRECTORY, so N models quietly
+# cost N x cap (18 GiB on a 5-model install). This bounds the store in TOTAL:
+# the least-recently-used model caches go first. Regenerable data only — the
+# cost of an eviction is a slower first token, never a re-download.
+_err_apc_sweep() {
+  local apc_dir="${1:-${APC_DISK_PATH:-}}"
+  [[ -n "$apc_dir" && -d "$apc_dir" ]] || return 0
+  local cap_gb="${ERR_APC_TOTAL_GB:-6}"
+  case "${cap_gb:l}" in (0|off|false|no) return 0 ;; esac
+  local cap_kb=$(( cap_gb * 1024 * 1024 ))
+  local dir kb total=0 line
+  local -a dirs=( "$apc_dir"/*(N/) )
+  (( ${#dirs} )) || return 0
+  for dir in "${dirs[@]}"; do
+    kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1}')
+    (( total += ${kb:-0} ))
+  done
+  (( total <= cap_kb )) && return 0
+  # oldest first, by directory mtime (= last time that model cached anything)
+  local -a old=( ${(f)"$(ls -dtr "$apc_dir"/*(N/))"} )
+  local freed=0
+  for dir in "${old[@]}"; do
+    (( total <= cap_kb )) && break
+    kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1}')
+    [[ -d "$dir" ]] || continue
+    rm -rf "$dir" 2>/dev/null || continue
+    (( total -= ${kb:-0}, freed += ${kb:-0} ))
+  done
+  (( freed > 0 )) && [[ -n "${ERR_DEBUG:-}" && "${ERR_DEBUG:-0}" != (0|false|"") ]] && \
+    print -u2 "err: APC store over ${cap_gb} GiB — evicted $(( freed / 1024 )) MiB of old prefix cache"
   return 0
 }
 
@@ -1039,7 +1073,7 @@ _err_cache_cmd() {
   # Numeric settings are interpolated into the JSON payload, so coerce a
   # non-numeric env override back to the default rather than emit invalid JSON.
   local cap iv ent
-  cap="${APC_DISK_MAX_GB:-5}";          [[ "$cap" == <-> ]] || cap=5
+  cap="${APC_DISK_MAX_GB:-2}";          [[ "$cap" == <-> ]] || cap=2
   iv="${APC_CHECKPOINT_INTERVAL_TOKENS:-512}"; [[ "$iv" == <-> ]] || iv=512
   ent="${APC_CHECKPOINT_ENTRIES:-2}";    [[ "$ent" == <-> ]] || ent=2
 
@@ -1081,7 +1115,7 @@ _err_cache_cmd() {
   done
   printf '\n  %s total\n\n' "$(_err_fmt_bytes "$total")"
   print "  * = regenerable; remove with 'err clean <category>'"
-  print "  APC: enabled=$enabled  cap=${cap}GB  interval=${iv} tokens  entries=${ent}"
+  print "  APC: enabled=$enabled  cap=${cap}GB/model, ${ERR_APC_TOTAL_GB:-6}GB total  interval=${iv} tokens  entries=${ent}"
   [[ -n "$ct" ]] && print "  APC last request: cached_tokens=$ct"
   return 0
 }

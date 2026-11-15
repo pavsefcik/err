@@ -99,6 +99,9 @@ err owns the full local-model lifecycle:
 - `err settings` — basic and advanced launch settings.
 - `err info <model>` — size, family and thinking capability for a model.
 - `err cache` / `err clean` — report the on-disk footprint and delete regenerable caches (never model weights).
+  The prefix cache (`apc/`) is bounded at 6 GB in total (`ERR_APC_TOTAL_GB`),
+  evicting the least-recently-used model first; mlx-vlm's own `APC_DISK_MAX_GB`
+  is per model, so on its own it never bounded the sum.
 - `err uninstall` — remove err from the system.
 
 ### The Apple model is a model choice too

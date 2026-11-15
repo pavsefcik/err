@@ -678,6 +678,9 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # Prefix caching: without this the server re-prefills the whole
     # conversation every turn (mlx-vlm leaves APC off by default).
     _err_export_apc_env "$state_dir"
+    # Bound the on-disk prefix cache in TOTAL before a server writes more into
+    # it; mlx-vlm's own cap is per model directory, so it never bounds the sum.
+    _err_apc_sweep "$state_dir/apc"
     # ERR_PROCTITLE + PYTHONPATH make the server rename itself to the model
     # name in Activity Monitor / ps (see lib/sitecustomize.py), and let a
     # compatible MoE load lib/err_moe from this checkout.
@@ -2016,6 +2019,9 @@ PY
     # Prefix caching: without this the server re-prefills the whole
     # conversation every turn (mlx-vlm leaves APC off by default).
     _err_export_apc_env "$state_dir"
+    # Bound the on-disk prefix cache in TOTAL before a server writes more into
+    # it; mlx-vlm's own cap is per model directory, so it never bounds the sum.
+    _err_apc_sweep "$state_dir/apc"
     # Rename this server to the model name in Activity Monitor / ps (see
     # lib/sitecustomize.py), so heads-up monitoring shows which model is up.
     _err_build_server_argv "$model" "$port" "$hub_dir" "${launch_flags[@]}"

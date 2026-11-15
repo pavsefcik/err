@@ -69,6 +69,10 @@ cache, never there.
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
+- **`APC_DISK_MAX_GB` is per model directory, not per store.** mlx-vlm bounds
+  each `<model>_s4-<hash>/` separately, so N models cost N × cap (18 GiB on a
+  5-model install). `_err_apc_sweep` bounds the total and runs before every
+  launch; keep it there or the disk grows with every model you try.
 - **Do not key sessions by PID.** macOS recycles pids; a fresh tab could inherit
   a dead tab's conversation. Sessions carry a uuid, and pid/tty are only
   informational.

@@ -15,6 +15,10 @@ err and marv-mlx are now one tool.
   `backend = fm` in `err.conf`, `apple-fm` is the default, so the `*` matches
   what a bare `err` actually uses.
 - Menu headers are white instead of purple, and start on their own line.
+- The on-disk prefix cache is bounded in total (`ERR_APC_TOTAL_GB`, default
+  6 GB) instead of per model. Five models used to mean 5 × 5 GB of KV cache
+  sitting next to the weights; `err run` now evicts least-recently-used model
+  caches first. Per-model cap lowered to 2 GB. `err cache` shows both numbers.
 
 - The `foreign sitecustomize.py …` line no longer prints on every command
   (it was never actionable; `ERR_DEBUG=1` brings it back).
