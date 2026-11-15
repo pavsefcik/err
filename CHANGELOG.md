@@ -22,6 +22,11 @@ err and marv-mlx are now one tool.
 
 ### Fixed
 
+- **MLX answers work.** With `backend = mlx`, err.py sent err.conf's
+  `model_id` (`system`) to the server, so mlx-vlm tried to load a HuggingFace
+  repo called `system` and returned `Repository Not Found` — every question
+  failed. The model id now comes from the manager (`last-model`, then
+  `default-model`), with `ERR_MLX_MODEL` / `mlx_model` as an explicit override.
 - `err default` / `err switch` now repoint the explain layer. They used to touch
   only the model manager, so picking an MLX model left `err what` answering from
   Apple FM (`backend = fm` in `err.conf` was never updated). `err status` now

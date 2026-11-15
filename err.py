@@ -172,6 +172,28 @@ def mlx_base_url() -> str:
     return url.strip().rstrip("/")
 
 
+def mlx_model_id() -> str:
+    """The model id the :11500 server is serving.
+
+    err.conf's `model_id` (`system` / `pcc`) belongs to the fm backend. Sending
+    it to the MLX server makes mlx-vlm try to load a HuggingFace repo called
+    "system" and fail with Repository Not Found. The model manager records what
+    it started in `last-model` (and what you chose in `default-model`).
+    """
+    explicit = (os.environ.get("ERR_MLX_MODEL") or CFG.get("mlx_model") or "").strip()
+    if explicit:
+        return explicit
+    for name in ("last-model", "default-model"):
+        try:
+            with open(os.path.join(state_dir(), name)) as f:
+                model = f.readline().strip()
+        except OSError:
+            continue
+        if model and model != "apple-fm":
+            return model
+    return ""
+
+
 def prepare_backend() -> tuple:
     """Return (base_url, model_id) for the configured backend."""
     backend = backend_name()
@@ -184,7 +206,14 @@ def prepare_backend() -> tuple:
                 file=sys.stderr,
             )
             sys.exit(1)
-        return base, CFG.get("model_id", "system")
+        model = mlx_model_id()
+        if not model:
+            print(
+                "❌ no MLX model selected — run: err default <model> (or err run <model>)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return base, model
 
     # fm and pcc both use the on-device fm server.
     if not ensure_running():

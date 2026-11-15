@@ -47,6 +47,9 @@ def main():
         "ERR_STATE_DIR": tmp,
         "ERR_BACKEND": "mlx",
         "ERR_BASE_URL": base_url,
+        # The mock stands in for the :11500 server; mlx-vlm would otherwise be
+        # asked to load err.conf's fm model_id ("system").
+        "ERR_MLX_MODEL": "mock/model",
         "_ERR_SESSION_ID": sid,
         "_ERR_TOKENS_FILE": tokens_file,
         "_ERR_SUGGEST_FILE": suggest_file,
@@ -199,6 +202,33 @@ def main():
         check(proc.returncode == 0, f"delete failed: {proc.stderr}")
         check(not os.path.isfile(session_file(sid)), "confirmed delete left files")
         ok("delete confirm")
+
+        # The mlx backend must not send err.conf's fm model_id ("system") to the
+        # server: mlx-vlm would try to load an HF repo called "system".
+        saved_env = {k: os.environ.get(k) for k in ("ERR_STATE_DIR", "ERR_MLX_MODEL")}
+        os.environ["ERR_STATE_DIR"] = tempfile.mkdtemp(prefix="err-state-", dir=tmp)
+        os.environ.pop("ERR_MLX_MODEL", None)
+        try:
+            check(errmod.mlx_model_id() == "", "unknown mlx model should be empty")
+            with open(os.path.join(errmod.state_dir(), "last-model"), "w") as f:
+                f.write("mlx-community/Some-Model\n")
+            check(errmod.mlx_model_id() == "mlx-community/Some-Model",
+                  "mlx_model_id did not read last-model")
+            with open(os.path.join(errmod.state_dir(), "last-model"), "w") as f:
+                f.write("apple-fm\n")
+            check(errmod.mlx_model_id() == "",
+                  "mlx_model_id returned the Apple sentinel")
+            os.environ["ERR_MLX_MODEL"] = "explicit/model"
+            check(errmod.mlx_model_id() == "explicit/model",
+                  "ERR_MLX_MODEL did not win")
+        finally:
+            os.environ.pop("ERR_MLX_MODEL", None)
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        ok("mlx model id resolution")
 
         print(f"\nALL {len(passed)} TESTS PASSED")
         return 0

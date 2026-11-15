@@ -80,6 +80,10 @@ cache, never there.
 - **`$var[` is an array subscript in zsh.** `grep -E "^\s*$key[[:space:]]*="` is
   parsed as `$key[...]` and dies with "bad output format specification". Write
   `${key}` whenever a variable is followed by `[`.
+- **`model_id` in err.conf is an fm value (`system` / `pcc`), never an MLX id.**
+  Sending it to the :11500 server makes mlx-vlm try to download a repo named
+  `system`. `mlx_model_id()` resolves the served model from `last-model` /
+  `default-model`, so the manager and the explain layer cannot drift again.
 - **The chosen model must reach the explain layer.** `err default` / `err switch`
   write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from
