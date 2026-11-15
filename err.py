@@ -284,7 +284,7 @@ def shell_defn(cmd: str) -> str:
 
 def state_dir() -> str:
     return os.path.abspath(
-        os.path.expanduser(os.environ.get("ERR_STATE_DIR") or "~/.cache/marv/mlx")
+        os.path.expanduser(os.environ.get("ERR_STATE_DIR") or "~/.cache/err")
     )
 
 

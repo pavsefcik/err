@@ -121,7 +121,9 @@ its own port (`err.conf` → `port`, default `8080`) instead of `:11500`, and
 at `:11500` because that is the port OpenAI clients and the pi extension expect;
 for the Apple model the base URL is `http://127.0.0.1:8080/v1`.
 
-State lives in `ERR_STATE_DIR`, which defaults to `~/.cache/marv/mlx` (inherited from marv-mlx so existing config, chats and logs keep working). It holds `config.zsh`, `sessions/`, `chats/`, logs and cached catalogs; model weights stay in the HuggingFace hub cache.
+State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`config.zsh`, `sessions/`, `chats/`, logs, the prefix cache and cached catalogs). `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
+
+Model weights are never in err's state: they live in the HuggingFace hub cache, `~/.cache/huggingface/hub/models--<org>--<name>/`, where the model directory holds `snapshots/…` symlinks into `blobs/`. That is why a fully downloaded 4B model can show as a few MB in `du` — the weights are in `blobs/`, shared by link.
 
 ## Use from any app
 

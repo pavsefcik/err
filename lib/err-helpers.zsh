@@ -90,7 +90,7 @@ _err_tui_leave() {
 # still works.
 _err_migrate_legacy_state() {
   local old="$HOME/.cache/ymlx"
-  local new="$HOME/.cache/marv/mlx"
+  local new="${ERR_STATE_DIR:-$HOME/.cache/err}"
   _err_migrate_state_dir "$old" "$new"
   _err_migrate_config "$new/config.zsh"
   _err_migrate_zshrc "$HOME/.zshrc"
@@ -98,7 +98,7 @@ _err_migrate_legacy_state() {
   return 0
 }
 
-# Copy old runtime state to the shared marv cache root (target-absent guard).
+# Copy old runtime state into err's own state root (target-absent guard).
 _err_migrate_state_dir() {
   local old="$1" new="$2"
   if [[ -d "$old" && ! -e "$new" ]]; then
@@ -797,7 +797,7 @@ _err_apply_launch_thinking() {
 # with ERR_APC=0 (or APC_ENABLED=0). The disk tier is pointed under
 # err's state dir instead of mlx-vlm's global ~/.cache/mlx-vlm/apc.
 _err_export_apc_env() {
-  local state_dir="${1:-$HOME/.cache/marv/mlx}"
+  local state_dir="${1:-${ERR_STATE_DIR:-$HOME/.cache/err}}"
   local apc_opt="${ERR_APC:-1}"
   case "${apc_opt:l}" in
     (0|off|false|no) return 0 ;;
@@ -1017,7 +1017,7 @@ _err_last_cached_tokens() {
 # `removable` marks what `err clean` may delete — regenerable caches only.
 # Model weights and chat history are reported but never disposable.
 _err_cache_report() {
-  local state_dir="${1:-$HOME/.cache/marv/mlx}"
+  local state_dir="${1:-${ERR_STATE_DIR:-$HOME/.cache/err}}"
   local hub_dir="${2:-$HOME/.cache/huggingface/hub}"
   local tools_dir="${3:-}"
   if [[ -z "$tools_dir" ]] && command -v uv >/dev/null 2>&1; then

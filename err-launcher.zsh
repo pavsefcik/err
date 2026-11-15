@@ -10,10 +10,23 @@
 _ERR_DIR="${0:A:h}"
 export _ERR_DIR
 
-# Model-manager state root. Inherited from marv-mlx on purpose so existing
-# config, chats and logs keep working; override with ERR_STATE_DIR.
-: "${ERR_STATE_DIR:=$HOME/.cache/marv/mlx}"
+# err's own state root. Deliberately NOT ~/.cache/marv (that belongs to the
+# marv harness and its embedded launches); override with ERR_STATE_DIR.
+: "${ERR_STATE_DIR:=$HOME/.cache/err}"
 export ERR_STATE_DIR
+
+# One-time move of err's state out of the old shared marv-mlx root. Only err's
+# own files come across: apc/, logs/ and venvs/ are regenerable and stay behind
+# with marv. Runs once, guarded by the new directory not existing yet.
+if [[ ! -e "$ERR_STATE_DIR" && -d "$HOME/.cache/marv/mlx" ]]; then
+  (
+    mkdir -p "$ERR_STATE_DIR" 2>/dev/null
+    for _p in config.zsh chats sessions curated-llms.md default-model last-model; do
+      [[ -e "$HOME/.cache/marv/mlx/$_p" ]] && \
+        cp -R "$HOME/.cache/marv/mlx/$_p" "$ERR_STATE_DIR/$_p" 2>/dev/null
+    done
+  )
+fi
 
 # One conversation per shell (tab / window). A uuid, NOT the PID: pids are
 # recycled by the kernel, so a fresh tab could silently inherit a dead tab's

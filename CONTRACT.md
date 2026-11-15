@@ -25,8 +25,10 @@ Single source of truth for the seams between the three layers. Read before editi
 | `$ERR_STATE_DIR/config.zsh` | model-launch config (written by `err settings`) | sourced by engine |
 | `VERSION` | `0.601.0` | |
 
-`ERR_STATE_DIR` defaults to `$HOME/.cache/marv/mlx` (inherited from marv-mlx on
-purpose: existing config, chats and logs keep working). Sessions live in
+`ERR_STATE_DIR` defaults to `$HOME/.cache/err`. `~/.cache/marv` is the marv
+harness's and is never written by err; a first-run migration copies err's own
+files (`config.zsh`, `chats/`, `sessions/`, catalog) out of the old shared
+`~/.cache/marv/mlx` and leaves apc/logs/venvs behind. Sessions live in
 `$ERR_STATE_DIR/sessions/`.
 
 ## Dispatch

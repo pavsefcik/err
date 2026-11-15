@@ -25,6 +25,11 @@ err and marv-mlx are now one tool.
 - Menu rows line up: the default marker is ASCII `*`, not a double-width `★`,
   which shifted every row under it.
 
+- **err has its own state root.** `~/.cache/err` instead of borrowing marv-mlx's
+  `~/.cache/marv/mlx`; `~/.cache/marv` is left to the marv harness. First run
+  copies err's own files across (config, chats, sessions, catalog) and leaves
+  apc/logs/venvs behind.
+
 ### Merged
 
 - **The model manager.** `err` now carries the full marv-mlx engine: run,

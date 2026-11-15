@@ -30,8 +30,9 @@ dispatch, env vars, or session storage.
 The model-launch settings are a separate file, `$ERR_STATE_DIR/config.zsh`,
 written by `err settings`.
 
-State: `ERR_STATE_DIR`, default `~/.cache/marv/mlx` — inherited from marv-mlx on
-purpose so existing config, chats, logs and the APC cache keep working. It holds
+State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
+marv harness** — never write err's state there; the launcher's one-time migration
+only *reads* it. It holds
 `config.zsh`, `sessions/`, `chats/`, `logs/`, `apc/`, `run/` (per-shell scratch),
 `default-model`, `last-model`, `curated-llms.md`. Weights live in the HF hub
 cache, never there.

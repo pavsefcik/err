@@ -15,7 +15,7 @@ on inside the tool env itself so foreign launches are covered too.
 
 Semantics: ``setdefault`` only — any value already in the environment wins.
 Opt out entirely by setting ``APC_ENABLED=0`` or ``ERR_APC=0`` in the
-launching environment (e.g. in ``~/.cache/marv/mlx/config.zsh``).
+launching environment (e.g. in ``~/.cache/err/config.zsh``).
 
 This file must stay silent (no stdout/stderr writes): other console scripts in
 this env (mlx_vlm.chat, mlx_vlm.convert, ...) import it as well.
@@ -34,7 +34,7 @@ if not _opted_out("ERR_APC") and not _opted_out("APC_ENABLED"):
     os.environ.setdefault("APC_ENABLED", "1")
     os.environ.setdefault("APC_DISK_ENABLED", "1")
     os.environ.setdefault(
-        "APC_DISK_PATH", os.path.expanduser("~/.cache/marv/mlx/apc")
+        "APC_DISK_PATH", os.path.expanduser("~/.cache/err/apc")
     )
     os.environ.setdefault("APC_DISK_MAX_GB", "5")
     # Hybrid models (Qwen3.5-style interleaved linear/full attention) use

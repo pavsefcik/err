@@ -19,7 +19,7 @@ source "$_ERR_SRC_DIR/lib/err-helpers.zsh"
 _err_engine() {
   local ERR_DEBUG=false
   local hub_dir=~/.cache/huggingface/hub
-  local state_dir=~/.cache/marv/mlx
+  local state_dir="${ERR_STATE_DIR:-$HOME/.cache/err}"
   local log_dir="$state_dir/logs"
   local config_file="$state_dir/config.zsh"
   local chat_dir="$state_dir/chats"
@@ -89,7 +89,7 @@ _err_engine() {
   # upstream can add models between releases, so an interactive startup refreshes
   # a cached copy from GitHub (`_err_catalog_sync`: TTL-gated, ~5s timeout,
   # offline keeps what we have). The cache sits at the legacy path sibling tools
-  # read (`~/.cache/marv/mlx/curated-llms.md`) and is what the Download menu and
+  # read (`~/.cache/err/curated-llms.md`) and is what the Download menu and
   # `err curated` serve. A `ERR_CATALOG` override points at a different
   # list and disables the refresh; ERR_CATALOG_TTL (seconds, 0 = every run,
   # `never` = off) and ERR_CATALOG_URL tune it.
@@ -169,7 +169,7 @@ ERR_SERVER_FLAGS=(
 # set ERR_APC=0 to disable APC entirely.
 # APC_ENABLED=1
 # APC_DISK_ENABLED=1
-# APC_DISK_PATH="$HOME/.cache/marv/mlx/apc"
+# APC_DISK_PATH="$HOME/.cache/err/apc"
 # APC_DISK_MAX_GB=5
 # APC_NUM_BLOCKS=2048
 # APC_CHECKPOINT_INTERVAL_TOKENS=512
