@@ -2157,6 +2157,20 @@ PY
     ' "$f" > "$tmp" && mv "$tmp" "$f"
   }
 
+  # err.py resolves the backend as `ERR_BACKEND` env -> err.conf. Status and
+  # the switch/default messages must show the SAME thing, or a stray exported
+  # ERR_BACKEND makes the file say mlx while err keeps answering from fm.
+  _err_effective_backend() {
+    local env_be file_be
+    env_be="${ERR_BACKEND:-}"
+    file_be="$(_err_conf_get backend)"
+    if [[ -n "$env_be" ]]; then
+      print -r -- "$env_be${file_be:+  (ERR_BACKEND overrides err.conf: $file_be)}"
+    else
+      print -r -- "${file_be:-fm}"
+    fi
+  }
+
   _err_conf_get() {
     local key="$1" f="$_ERR_SRC_DIR/err.conf"
     [[ -r "$f" ]] || return 1
@@ -2178,6 +2192,13 @@ PY
       _err_conf_set backend mlx
       print "err: explain/ask now uses $model on :11500"
       print "  (starts on demand; 'err run $model' starts it now)"
+    fi
+    # A stray exported ERR_BACKEND beats the file, and that is invisible unless
+    # we say so: the user changes the setting, sees it "applied", and err keeps
+    # answering from the old backend.
+    if [[ -n "${ERR_BACKEND:-}" ]]; then
+      print -u2 "err: ⚠ this shell exports ERR_BACKEND=$ERR_BACKEND, which overrides"
+      print -u2 "     err.conf. Run 'unset ERR_BACKEND' (or start a new shell)."
     fi
   }
 
@@ -2424,16 +2445,33 @@ PY
   #   this model there     -> wait for it to finish loading, change nothing
   # Model comes from default-model (then last-model) when the arg is omitted.
   _err_headless_ensure() {
-    local model="${1:-}" pid port cur
+    local model="${1:-}" pid port cur unsupported
     [[ -z "$model" ]] && model=$(_err_default_model)
     if [[ -z "$model" ]]; then
       print -u2 "err: no model selected — pick one with: err default <model>"
       return 1
     fi
-    if [[ "$model" == "$_ERR_FM_ID" ]]; then
-      print -u2 "err: $model is served by the fm backend, not on :11500"
+    # fm's sentinels are not HuggingFace repos. Without this, `ensure system`
+    # falls through to snapshot_download and 404s on api/models/system — the
+    # exact repo-not-found failure the fm/MLX split exists to prevent.
+    if [[ "$model" == "$_ERR_FM_ID" || "$model" == (system|pcc) ]]; then
+      print -u2 "err: $model is the on-device fm backend, not an MLX model on :11500"
       print -u2 "err: choose an MLX model with: err default <model>"
       return 1
+    fi
+    # Validate, and fetch missing weights, BEFORE stopping anything: a bad or
+    # unavailable model must not take down the server that answers right now.
+    if unsupported=$(_err_model_unsupported_reason "$model" "$hub_dir"); then
+      print -u2 "err: $model can't be served — $unsupported."
+      print -u2 "MLX-quantized repos run directly (e.g. mlx-community/…-4bit)."
+      return 1
+    fi
+    if [[ ! -d "$hub_dir/models--${model//\//--}/snapshots" ]]; then
+      print -u2 "err: downloading $model first (no local snapshot)…"
+      _err_snapshot_download "$model" || {
+        print -u2 "err: download failed for $model — the running server is untouched"
+        return 1
+      }
     fi
     cur=""
     if [[ -n "$(_err_running_model)" ]]; then
@@ -2552,7 +2590,7 @@ PY
     [[ "${1:-}" == "--json" ]] && json=1
     if (( ! json )); then
       local be bemodel
-      be=$(_err_conf_get backend); be=${be:-fm}
+      be=$(_err_effective_backend)
       bemodel=$(cat "$state_dir/default-model" 2>/dev/null | tr -d '[:space:]')
       print "err: backend=$be${bemodel:+  default=$bemodel}"
       fmport=$(_err_fm_port)

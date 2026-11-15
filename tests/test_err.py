@@ -214,10 +214,11 @@ def main():
                 f.write("mlx-community/Some-Model\n")
             check(errmod.mlx_model_id() == "mlx-community/Some-Model",
                   "mlx_model_id did not read last-model")
-            with open(os.path.join(errmod.state_dir(), "last-model"), "w") as f:
-                f.write("apple-fm\n")
-            check(errmod.mlx_model_id() == "",
-                  "mlx_model_id returned the Apple sentinel")
+            for sentinel in ("apple-fm", "system", "pcc"):
+                with open(os.path.join(errmod.state_dir(), "last-model"), "w") as f:
+                    f.write(sentinel + "\n")
+                check(errmod.mlx_model_id() == "",
+                      "mlx_model_id returned the fm sentinel %r" % sentinel)
             os.environ["ERR_MLX_MODEL"] = "explicit/model"
             check(errmod.mlx_model_id() == "explicit/model",
                   "ERR_MLX_MODEL did not win")

@@ -58,7 +58,22 @@ typeset -g _ERR_TURNS=0
 typeset -g _ERR_TOKENS=0
 typeset -g _ERR_RPROMPT_OWNED=0
 
-_err_version() { print -r -- "$(<"$_ERR_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')" }
+# When this shell loaded the launcher. Used to spot a stale in-memory `err`
+# after the file changed on disk — `switch`/`help` live here, so a stale copy
+# silently ignores them until you reload.
+# EPOCHSECONDS comes from zsh/datetime and is unset under `zsh -f`, so fall
+# back to date(1) rather than 0 (which would flag every shell as stale).
+typeset -g _ERR_LOADED_AT="${_ERR_LOADED_AT:-${EPOCHSECONDS:-$(date +%s)}}"
+
+_err_version() {
+  print -r -- "$(<"$_ERR_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
+  local src="$_ERR_DIR/err-launcher.zsh" mtime
+  mtime=$(/usr/bin/stat -f %m "$src" 2>/dev/null)
+  if [[ -n "$mtime" ]] && (( mtime > _ERR_LOADED_AT )); then
+    print -u2 "err: ⚠ err-launcher.zsh changed on disk after this shell loaded it"
+    print -u2 "     this shell runs stale code for dispatch/help — run: reload"
+  fi
+}
 
 _err_update_rprompt() {
   # Never clobber a prompt the user already set up; only own an empty RPROMPT.

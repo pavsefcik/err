@@ -172,6 +172,9 @@ def mlx_base_url() -> str:
     return url.strip().rstrip("/")
 
 
+FM_MODEL_IDS = ("apple-fm", "system", "pcc")
+
+
 def mlx_model_id() -> str:
     """The model id the :11500 server is serving.
 
@@ -189,7 +192,7 @@ def mlx_model_id() -> str:
                 model = f.readline().strip()
         except OSError:
             continue
-        if model and model != "apple-fm":
+        if model and model not in FM_MODEL_IDS:
             return model
     return ""
 
