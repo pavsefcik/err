@@ -66,7 +66,9 @@ it through the same `_err_explain` path (never through `err`, which shows help).
 | `_ERR_TOKENS_FILE` | err.py writes cumulative session token count here |
 | `_ERR_SESSION_ID_FILE` | err.py writes the *new* id here after `new` / `resume N` (a child cannot mutate the shell), one line; the launcher reads it back |
 
-Test/CI overrides (never needed interactively): `ERR_BACKEND`, `ERR_BASE_URL`,
+Test/CI overrides: `ERR_CONF` (alternate err.conf, honoured by all three layers),
+`ERR_HUB_DIR` (alternate HuggingFace hub), plus the following — never needed
+interactively: `ERR_BACKEND`, `ERR_BASE_URL`,
 `ERR_SUGGEST` override the matching `err.conf` values so `tests/test_err.py` can
 point at a mock server with no `fm` and no network. `ERR_MLX_AUTOSTART`
 (`on`/`off`) overrides `err.conf` → `mlx_autostart`.

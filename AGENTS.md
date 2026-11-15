@@ -77,6 +77,11 @@ cache, never there.
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
+- **Quotes in an associative-array subscript are part of the key.** `M["$k"]=v`
+  stores the key `"v"` *with quotes*; `${M[$k]}` then misses. This silently
+  broke **every** menu selection for a while (rows rendered, choice discarded,
+  engine returned 1 with no message) — `_ERR_PICK_MAP[$label]=` must stay
+  unquoted. Lookup position is fine either way.
 - **`$var[` is an array subscript in zsh.** `grep -E "^\s*$key[[:space:]]*="` is
   parsed as `$key[...]` and dies with "bad output format specification". Write
   `${key}` whenever a variable is followed by `[`.
@@ -119,9 +124,23 @@ cache, never there.
 
 ```sh
 make lint    # zsh -n on the three .zsh files, py_compile on err.py
-make test    # test_dispatch.zsh (hooks + dispatch, stubs both engines)
-             # test_err.py      (explain/ask/sessions against a mock SSE server)
+make test    # dispatch  hooks/dispatch, both engines stubbed
+             # err.py    explain/ask/sessions against a mock SSE server
+             # menus     the real picker code driven by a fake `gum`
+             # smoke     real launcher + err.py + engine dispatch, end to end
 ```
+
+`tests/smoke.zsh` is the one that matters: it runs the launcher in an
+interactive zsh against a mock OpenAI server, in a throwaway `ERR_STATE_DIR` /
+`ERR_CONF` / `ERR_HUB_DIR`, and asserts **what the user sees** — the answer
+arrives, `err default X` changes what the next question uses, a suggestion lands
+in history, an unreachable backend fails loudly. Every bug shipped so far would
+have failed one of its checks; none of the older tests would have.
+
+`err doctor` is the manual equivalent for a real install: one pass/warn/fail
+line for conf, python, launcher freshness, state, default model, the backend's
+server, tools, disk and scratch files. When a report starts with "it doesn't
+work", run that first.
 
 Covered without a TTY, without `fm`, without models or network:
 dispatch routing for every verb, the preexec guard, unquoted `?`, explain and

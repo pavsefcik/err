@@ -56,6 +56,7 @@ TO ERR IS HUMAN.
   err cache                  show on-disk footprint (APC, logs, hub, tool env)
   err clean                  delete regenerable caches (never model weights)
   err uninstall              remove err from your system
+  err doctor                 check the install: config, backends, server, disk
   err endpoint               print the base URL / model of the running server
   err version | -v           show the current version
   err help | -h              show this help (this is also what bare `err` does)
@@ -75,6 +76,18 @@ errc git push origin main
 The explain layer is configured in `err.conf` (prompts, temperature, backend): `backend = fm` uses the on-device Apple Foundation Model (the default), `backend = pcc` uses Private Cloud Compute, and `backend = mlx` points it at the local model server on `:11500`.
 
 **err never executes a command a model suggests.** With the default setting (`suggest = history` in `err.conf`) the suggestion is appended to your shell history: press **↑** to recall it, read it, edit it, then Enter — or never. `suggest = ask` drops it into the prompt buffer instead, `suggest = off` stops offering commands.
+
+### When something looks wrong
+
+```sh
+err doctor
+```
+
+One line per subsystem — config, python, launcher freshness, state, default
+model, the backend's server, tools, disk, scratch files — each `ok`, `warn` or
+`fail` with the command that fixes it. It also names the two silent traps: a
+stale launcher in this shell (`reload`) and a stray `ERR_BACKEND` that overrides
+`err.conf`.
 
 ### Autostart
 

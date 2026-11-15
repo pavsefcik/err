@@ -17,6 +17,18 @@ All notable changes to err are documented here. Format follows
 
 ### Fixed
 
+- **Model menus did work — the choice was thrown away.** In zsh, quotes inside
+  an associative-array subscript become part of the key, so `_ERR_PICK_MAP["$label"]`
+  stored `"…"` and the lookup always missed: rows rendered, the selection mapped
+  to nothing, and `err run/switch/default` returned 1 in silence. This is the
+  "I can't move from FM" bug.
+- Scratch files under `$ERR_STATE_DIR/run` are reaped now (dead shells at
+  startup, own files at exit); 246 had accumulated.
+- `err default` accepts a remote model (`mlx_model` / `ERR_MLX_MODEL`) without
+  requiring local weights.
+- New: `err doctor`, `tests/smoke.zsh`, `tests/menu.zsh`, and `ERR_CONF` /
+  `ERR_HUB_DIR` so the whole stack can be exercised hermetically.
+
 - `err switch` keeps the pick. It started the model but recorded only
   `last-model`, so the next call could fall back to the model you had just
   switched away from; switch now also writes `default-model` like
@@ -50,6 +62,18 @@ err and marv-mlx are now one tool.
   screen and `err.conf`.
 
 ### Fixed
+
+- **Model menus did work — the choice was thrown away.** In zsh, quotes inside
+  an associative-array subscript become part of the key, so `_ERR_PICK_MAP["$label"]`
+  stored `"…"` and the lookup always missed: rows rendered, the selection mapped
+  to nothing, and `err run/switch/default` returned 1 in silence. This is the
+  "I can't move from FM" bug.
+- Scratch files under `$ERR_STATE_DIR/run` are reaped now (dead shells at
+  startup, own files at exit); 246 had accumulated.
+- `err default` accepts a remote model (`mlx_model` / `ERR_MLX_MODEL`) without
+  requiring local weights.
+- New: `err doctor`, `tests/smoke.zsh`, `tests/menu.zsh`, and `ERR_CONF` /
+  `ERR_HUB_DIR` so the whole stack can be exercised hermetically.
 
 - **MLX answers work.** With `backend = mlx`, err.py sent err.conf's
   `model_id` (`system`) to the server, so mlx-vlm tried to load a HuggingFace
