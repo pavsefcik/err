@@ -1,5 +1,7 @@
 # err
 
+*To err is human.*
+
 Corrects and explains your last shell command, and runs local MLX models on Apple Silicon — on-device by default, no API key, no cloud.
 
 ## Requirements
