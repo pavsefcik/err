@@ -34,7 +34,7 @@ hand-edited via `err config`.
 State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
 marv harness** — never write err's state there; the launcher's one-time migration
 only *reads* it. It holds
-`config.zsh`, `sessions/`, `chats/`, `logs/`, `apc/`, `run/` (per-shell scratch),
+`config.zsh`, `sessions/`, `logs/`, `apc/`, `run/` (per-shell scratch),
 `default-model`, `last-model`, `err-curator.md` (the curated catalog). Weights
 live in the HF hub cache, never there.
 
@@ -155,9 +155,10 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
   model that is already loading instead of killing it: relaunching costs the
   whole load again. `mlx_autostart = off` is the escape hatch.
 - **`APC_DISK_MAX_GB` is per model directory, not per store.** mlx-vlm bounds
-  each `<model>_s4-<hash>/` separately, so N models cost N × cap (18 GiB on a
-  5-model install). `_err_apc_sweep` bounds the total and runs before every
-  launch; keep it there or the disk grows with every model you try.
+  each `<model>_s4-<hash>/` separately, so N models cost N × cap. `_err_apc_sweep`
+  also expires checkpoint files untouched for `apc_max_age_days` (7) and bounds
+  the TOTAL by `ERR_APC_TOTAL_GB`; it runs before every launch and after every
+  stop. Keep those calls there or the disk grows with every model you try.
 - **Do not key sessions by PID.** macOS recycles pids; a fresh tab could inherit
   a dead tab's conversation. Sessions carry a uuid, and pid/tty are only
   informational.

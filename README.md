@@ -150,10 +150,12 @@ err owns the full local-model lifecycle:
   `err swap`.
 - `err stop` — stop what err started. It also ends the conversation: a fresh
   session is prepared for the next start (the turn/token counter goes back to 0).
-- `err cleanup` — free space: kv-cache, logs, sessions, chats or all, with
+- `err cleanup` — free space: kv-cache, logs, sessions or all, with
   the size of each shown before you pick (never model weights). `err cleanup all`
   goes straight to the catch-all, and `err cleanup logs` to that target.
-  The prefix cache (`apc/`) is bounded in total; mlx-vlm's own `APC_DISK_MAX_GB`
+  The prefix cache (`apc/`) is bounded in total (`apc_total_gb`) and expires
+  entries untouched for `apc_max_age_days` (default 7) on every launch and stop;
+  mlx-vlm's own `APC_DISK_MAX_GB` only caps each model directory separately.
 ### The Apple model is a model choice too
 
 The on-device Apple Foundation Model appears in the same menus as `apple-fm`:
@@ -168,7 +170,7 @@ its own port (`err.conf` → `port`, default `8080`) instead of `:11500`, and
 `err info` reports it. OpenAI clients and the pi extension expect `:11500`; for
 the Apple model the base URL is `http://127.0.0.1:8080/v1`.
 
-State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`err.conf`, `sessions/`, `chats/`, logs, the prefix cache and the cached catalog). `err config` opens the one config file; `temperature` / `max_tokens` there are shared by `err "<question>"`, and extra launch flags are repeated `server_flag = --kv-bits 8` lines. `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
+State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`err.conf`, `sessions/`, logs, the prefix cache and the cached catalog). `err config` opens the one config file; `temperature` / `max_tokens` there are shared by `err "<question>"`, and extra launch flags are repeated `server_flag = --kv-bits 8` lines. `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
 
 Model weights are never in err's state: they live in the HuggingFace hub cache, `~/.cache/huggingface/hub/models--<org>--<name>/`, where the model directory holds `snapshots/…` symlinks into `blobs/`. That is why a fully downloaded 4B model can show as a few MB in `du` — the weights are in `blobs/`, shared by link.
 

@@ -18,7 +18,6 @@ _err_engine_main() {
   local state_dir="${ERR_STATE_DIR:-$HOME/.cache/err}"
   local log_dir="$state_dir/logs"
   local config_file="$state_dir/err.conf"
-  local chat_dir="$state_dir/chats"
 
   typeset -ga ERR_CHAT_FLAGS=( --max-tokens 2048 --temperature 0.7 )
   typeset -ga ERR_SERVER_FLAGS=()
@@ -78,7 +77,7 @@ _err_engine_main() {
   # guard holds.
   _err_migrate_legacy_state
 
-  mkdir -p "$state_dir" "$log_dir" "$chat_dir"
+  mkdir -p "$state_dir" "$log_dir"
 
   # The curated download list ships bundled in this repo (`err-curator.md`), but
   # upstream can add models between releases, so an interactive startup refreshes
@@ -685,6 +684,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
           moe_cache_gib)      ERR_QUICK_MOE_CACHE="$v" ;;
           apc_enabled)        export APC_ENABLED="$v" ;;
           apc_disk_max_gb)    export APC_DISK_MAX_GB="$v" ;;
+          apc_total_gb)       export ERR_APC_TOTAL_GB="$v" ;;
+          apc_max_age_days)   export ERR_APC_MAX_AGE_DAYS="$v" ;;
           chat_flag)          ERR_CHAT_FLAGS+=( ${=v} ) ;;
           server_flag)        ERR_SERVER_FLAGS+=( ${=v} ) ;;
         esac
@@ -1099,6 +1100,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && { _err_say "stopped $model (:$port)"; (( n++ )); }
       done < <(_err_running)
       (( n == 0 )) && _err_say "nothing is running"
+      _err_apc_sweep "$state_dir/apc"
       return 0
     fi
     if [[ -n "$want" ]]; then
@@ -1112,14 +1114,17 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         print -u2 "err: no running server for '$want'"
         return 1
       fi
+      _err_apc_sweep "$state_dir/apc"
       return 0
     fi
     if [[ -n "$(_err_running_model)" ]]; then
       local pid port cur
       read -r pid port cur <<< "$(_err_running_model)"
       kill "$pid" 2>/dev/null && print "err: stopped $cur (pid $pid)"
+      _err_apc_sweep "$state_dir/apc"
       return 0
     fi
+    _err_apc_sweep "$state_dir/apc"
     print "err: nothing running on :11500"
     return 0
   }
@@ -1603,7 +1608,6 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       kv-cache) print -r -- "$state_dir/apc" ;;
       logs)     print -r -- "$log_dir" ;;
       sessions) print -r -- "$state_dir/sessions" ;;
-      chats)    print -r -- "$chat_dir" ;;
     esac
   }
 
@@ -1611,7 +1615,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     local kind="$1" p
     if [[ "$kind" == all ]]; then
       local total=0 k
-      for k in kv-cache logs sessions chats; do
+      for k in kv-cache logs sessions; do
         p=$(_err_cleanup_path "$k")
         total=$(( total + $(_err_du_bytes "$p") ))
       done
@@ -1630,12 +1634,12 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     if (( $# )); then
       what="$1"
       case "$what" in
-        kv-cache|logs|sessions|chats|all) ;;
-        *) print -u2 "usage: err cleanup [kv-cache|logs|sessions|chats|all]"; return 2 ;;
+        kv-cache|logs|sessions|all) ;;
+        *) print -u2 "usage: err cleanup [kv-cache|logs|sessions|all]"; return 2 ;;
       esac
     else
       local -a rows=()
-      for kind in kv-cache logs sessions chats all; do
+      for kind in kv-cache logs sessions all; do
         rows+=( "err cleanup ${(r:10:)kind} $(_err_cleanup_size "$kind")" )
       done
       choice=$(_err_pick "${rows[@]}") || return 0
@@ -1647,7 +1651,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       # One confirmation, then every regenerable cache in one pass.
       _err_clean_cmd "$state_dir" "$hub_dir" --apc --force
       _err_clean_cmd "$state_dir" "$hub_dir" --logs
-      rm -rf "$(_err_cleanup_path sessions)" "$(_err_cleanup_path chats)"
+      rm -rf "$(_err_cleanup_path sessions)"
       return 0
     fi
     case "$what" in
@@ -1655,7 +1659,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       # the confirmation above.
       kv-cache) _err_clean_cmd "$state_dir" "$hub_dir" --apc --force ;;
       logs)     _err_clean_cmd "$state_dir" "$hub_dir" --logs ;;
-      sessions|chats) rm -rf "$(_err_cleanup_path "$what")" ;;
+      sessions) rm -rf "$(_err_cleanup_path "$what")" ;;
     esac
     return 0
   }

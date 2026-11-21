@@ -145,6 +145,7 @@ print "cleanup"
 _out=$(engine_rows dump cleanup 2>&1)
 contains "err cleanup kv-cache" "$_out" "every cache has a row"
 contains "err cleanup all" "$_out" "a catch-all row clears everything"
+not_contains "err cleanup chats" "$_out" "chats is no longer a cleanup row"
 if print -r -- "$_out" | grep -qE 'err cleanup kv-cache +([0-9.]+ ?[KMG]?i?B|0 ?B)'; then
   ok "rows carry a size"
 else

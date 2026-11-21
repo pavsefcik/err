@@ -22,7 +22,7 @@ export ERR_STATE_DIR
 if [[ ! -e "$ERR_STATE_DIR" && -d "$HOME/.cache/marv/mlx" ]]; then
   (
     mkdir -p "$ERR_STATE_DIR" 2>/dev/null
-    for _p in config.zsh chats sessions default-model last-model; do
+    for _p in config.zsh sessions default-model last-model; do
       [[ -e "$HOME/.cache/marv/mlx/$_p" ]] && \
         cp -R "$HOME/.cache/marv/mlx/$_p" "$ERR_STATE_DIR/$_p" 2>/dev/null
     done

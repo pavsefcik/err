@@ -809,12 +809,26 @@ _err_install_apc_sitecustomize() {
 
 # _err_apc_sweep [apc_dir]
 # mlx-vlm enforces APC_DISK_MAX_GB PER MODEL DIRECTORY, so N models quietly
-# cost N x cap (18 GiB on a 5-model install). This bounds the store in TOTAL:
-# the least-recently-used model caches go first. Regenerable data only — the
-# cost of an eviction is a slower first token, never a re-download.
+# cost N x cap. This bounds the store in TOTAL: the least-recently-used model
+# caches go first. Regenerable data only — the cost of an eviction is a slower
+# first token, never a re-download.
 _err_apc_sweep() {
   local apc_dir="${1:-${APC_DISK_PATH:-}}"
   [[ -n "$apc_dir" && -d "$apc_dir" ]] || return 0
+  # Age out stale prefix checkpoints before measuring. A model you tried once
+  # should not keep its cache forever; the per-model caps alone only shrink the
+  # store, they never expire it. ERR_APC_MAX_AGE_DAYS=0 disables.
+  local max_age="${ERR_APC_MAX_AGE_DAYS:-7}"
+  if [[ "$max_age" != (0|off|false|no) ]] && [[ "$max_age" == <-> ]] && (( max_age > 0 )); then
+    local mins=$(( max_age * 1440 )) n_stale f
+    n_stale=$(find "$apc_dir" -type f -mmin +"$mins" 2>/dev/null | wc -l | tr -d ' ')
+    if (( ${n_stale:-0} > 0 )); then
+      find "$apc_dir" -type f -mmin +"$mins" -delete 2>/dev/null
+      for f in "$apc_dir"/*(N/); do rmdir "$f" 2>/dev/null; done
+      [[ "${ERR_DEBUG:-0}" != (0|false|"") ]] && \
+        print -u2 "err: APC store — evicted ${n_stale} checkpoint file(s) older than ${max_age}d"
+    fi
+  fi
   local cap_gb="${ERR_APC_TOTAL_GB:-6}"
   case "${cap_gb:l}" in (0|off|false|no) return 0 ;; esac
   local cap_kb=$(( cap_gb * 1024 * 1024 ))
@@ -976,12 +990,12 @@ _err_cache_report() {
   fi
   [[ -n "$tools_dir" ]] || tools_dir="$HOME/.local/share/uv/tools"
 
-  local -a keys=( apc logs chats venvs hub env )
+  local -a keys=( apc logs venvs hub env )
   # `apc` follows the effective APC_DISK_PATH (set by _err_export_apc_env)
   # so the report and `clean --apc` agree on the same directory. `venvs` is a
   # legacy path older builds / manual experiments left under the state dir.
   local -a paths=(
-    "${APC_DISK_PATH:-$state_dir/apc}" "$state_dir/logs" "$state_dir/chats" "$state_dir/venvs"
+    "${APC_DISK_PATH:-$state_dir/apc}" "$state_dir/logs" "$state_dir/venvs"
     "$hub_dir" "$tools_dir/mlx-vlm"
   )
   local -a removable=( 1 1 0 1 0 0 )

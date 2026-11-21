@@ -25,7 +25,7 @@ All notable changes to err are documented here. Format follows
   id is highlighted), or `arr // nothing is running`. `err run` says
   `arr // <model> already running`.
 - **`err cleanup`** replaces `clear-cache`, with an `all` row that clears
-  kv-cache, logs, sessions and chats together. An explicit target
+  kv-cache, logs and sessions together. An explicit target
   (`err cleanup all`, `err cleanup logs`) skips the picker.
 - **`err help` opens the menu again.** It sits in the menu's typed-only header
   with `err 'question'` and `err wtf` (not pickable — it would re-open the same
@@ -58,6 +58,13 @@ All notable changes to err are documented here. Format follows
 - **`err stop` also ends the conversation:** it mints a fresh session and
   publishes `0` turns / `0` tokens, so the counter clears and the next start
   answers without the previous context.
+- **`err cleanup` no longer offers `chats`.** Chat history was removed with the
+  old TUI; the directory was legacy. `err cleanup` and `err cache` now cover
+  kv-cache, logs and sessions only.
+- **Prefix cache expires on its own.** `_err_apc_sweep` deletes APC checkpoint
+  files untouched for `apc_max_age_days` (default 7) on every launch and stop,
+  and the template now carries the total cap (`apc_total_gb = 6`) alongside a
+  saner per-model cap (`apc_disk_max_gb = 2`, was 18).
 - **`err swap` no longer repeats the running model** before opening its picker.
 - **Faster, colourful launch spinner** (zsh engine and err.py): the
   `loading <model> on http://…` status line is rewritten in place and replaced
