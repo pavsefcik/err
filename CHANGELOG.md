@@ -71,13 +71,17 @@ All notable changes to err are documented here. Format follows
   by `arr // running: <model> on http://…` when the server answers. Piped/CI
   runs get the states as separate lines.
 
-### Fixed
+### Added
 
-- **The model no longer pretends it can see the terminal.** Both built-in
-  prompts now state that err supplies the command, its exit code, and only
-  output piped into err; a plain command's terminal output is not captured (a
-  tee would break colours, pagers and full-screen programs). Asked what it can
-  see, it points at `cmd | err wtf` instead of guessing.
+- **Optional terminal capture: `capture = on`.** err tees each command's
+  stdout+stderr into `_ERR_STDOUT_FILE` for the duration of that command and
+  restores the terminal fds in `precmd`, so the next `err wtf` / question sees
+  what the command printed (last 40 lines, 3000 chars). It is off by default
+  because fd 1 is a pipe while a command runs: colours, pagers and full-screen
+  programs break. The prompts now say err sees captured or piped output, so a
+  model no longer claims ignorance or invents terminal contents.
+
+### Fixed
 
 - **`err run` picked the Apple model and downloaded it from Hugging Face.**
   `_err_headless_run` tested for `apple-fm` only on an explicit argument, then

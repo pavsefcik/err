@@ -110,16 +110,16 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
   `system_prompt` → builtin). `err doctor` shows what is in force via
   `err.py --prompt explain|question` (`origin<TAB>text`) — if you add a prompt,
   wire it into that flag, not into a second parser in zsh.
-- **A plain command's stdout is never captured, and must not be.** `preexec`/
-  `precmd` bracket a command but its bytes go straight to the tty; the only
-  in-shell trick is `exec > >(tee …)`, which makes fd 1 a pipe for the whole
-  run — colours, pagers and full-screen programs break. Output reaches the
-  model only through `cmd | err wtf` (`_ERR_STDIN_PIPED`, err.py reads its own
-  stdin). `errc` is gone: it teed both streams, and the tee is exactly the pipe
-  that breaks full-screen programs. `_err_fresh` gives the question path its
-  context for exactly one turn. If you are tempted
-  to add transparent capture, it is Atuin's pty-proxy — a whole-shell relay,
-  not a hook.
+- **Plain stdout is captured only when `capture = on`.** The default is off:
+  `preexec`/`precmd` bracket a command but its bytes go straight to the tty, so
+  output reaches the model only through `cmd | err wtf` (`_ERR_STDIN_PIPED`,
+  err.py reads its own stdin). With `capture = on`, `_err_capture_start` tees
+  fd 1/2 into `_ERR_STDOUT_FILE` for that command and `_err_capture_stop`
+  restores the saved terminal fds in `precmd`. That is exactly the trade-off:
+  fd 1 is a pipe while the command runs, so colours, pagers and full-screen
+  programs (less/vim/btop) break. Keep the capture opt-in; do not turn it on by
+  default. `errc` (a tee wrapper) is still gone. `_err_fresh` gives the question
+  path its context for exactly one turn.
 - **Watchdog pids must be the listener, not `$!`.** `mlx_vlm.server` is a uv
   shim that spawns the real server as a child, so SIGTERM to `$!` leaves the
   model (and its RAM) behind. `_err_arm_watchdog` resolves the pid with

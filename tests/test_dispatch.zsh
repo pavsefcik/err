@@ -162,6 +162,16 @@ for _v in off ask history; do
 done
 _ERR_DIR="$_saved_dir"; rm -rf "$_tmpdir"
 
+print "capture flag"
+_capconf=$(mktemp)
+print "capture = on" > "$_capconf"
+ERR_CONF="$_capconf"
+_check "0" "$(_err_capture_mode; print $?)" "capture = on parses"
+print "capture = off" > "$_capconf"
+_check "1" "$(_err_capture_mode; print $?)" "capture = off is the default"
+rm -f "$_capconf"
+ERR_CONF="$_ERR_DIR/err.conf"
+
 print 're-sourcing (the `reload` alias sources ~/.zshrc again)'
 _reload_out=$(zsh -f -c "source '$_ERR_DIR/err-launcher.zsh'; source '$_ERR_DIR/err-launcher.zsh'; print ok" 2>&1)
 _check "ok" "$_reload_out" "second source parses and runs"

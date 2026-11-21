@@ -1087,15 +1087,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "You explain what a shell command did on macOS zsh. Answer in one short "
     "sentence. If the command is an alias, say which command the alias runs. "
     "Do not include a code block. You see the command, its exit code, and any "
-    "output piped into err; you never see the terminal's own output."
+    "output err captured or that was piped into it."
 )
 
 DEFAULT_QUESTION_PROMPT = (
     "You answer shell questions for macOS zsh. Reply in at most three short "
     "sentences, then give one example command in a fenced code block. If the "
     "answer needs no command, skip the code block. You see the last command, "
-    "its exit code, and any output piped into err — not the terminal's own "
-    "output; if asked what you can see, say that and suggest `cmd | err wtf`."
+    "its exit code, and any output err captured or that was piped into it; if "
+    "the output is missing, say so and suggest `cmd | err wtf`."
 )
 
 

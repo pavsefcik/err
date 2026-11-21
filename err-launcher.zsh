@@ -94,6 +94,48 @@ typeset -g _ERR_TURNS="${_ERR_TURNS:-0}"
 typeset -g _ERR_TOKENS="${_ERR_TOKENS:-0}"
 typeset -g _ERR_RPROMPT_OWNED="${_ERR_RPROMPT_OWNED:-0}"
 
+# ── optional terminal capture ─────────────────────────────────────────
+# `capture = on` in err.conf tees the command's stdout+stderr to
+# _ERR_STDOUT_FILE for the duration of that command, so err can hand the model
+# what it printed. fd 1 becomes a pipe while a command runs: colours, pagers
+# and full-screen programs break. That is why this is opt-in (see AGENTS.md).
+_err_capture_mode() {
+  local v="${ERR_CAPTURE:-}" f
+  if [[ -z "$v" ]]; then
+    f="${ERR_CONF:-$_ERR_DIR/err.conf}"
+    [[ -r "$f" ]] && v=$(grep -E '^[[:space:]]*capture[[:space:]]*=' "$f" 2>/dev/null \
+      | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
+  fi
+  case "${v:l}" in (1|on|yes|true|all) return 0 ;; esac
+  return 1
+}
+
+typeset -g _ERR_CAPTURE_ON=0
+_err_capture_mode && _ERR_CAPTURE_ON=1
+# Save the real terminal fds once; capture restores them after every command.
+if (( _ERR_CAPTURE_ON )) && [[ -o interactive && -t 1 ]] \
+   && [[ -z "${_ERR_TTY_OUT:-}" ]]; then
+  exec {_ERR_TTY_OUT}>&1
+  exec {_ERR_TTY_ERR}>&2
+fi
+
+# Start/stop is bracketed by preexec/precmd. `tee` inherits the terminal as
+# its stdout, so the command still prints normally while the file fills.
+typeset -g _ERR_CAPTURE_ACTIVE="${_ERR_CAPTURE_ACTIVE:-0}"
+_err_capture_start() {
+  (( _ERR_CAPTURE_ON )) || return 0
+  [[ -n "${_ERR_TTY_OUT:-}" && -t 1 ]] || return 0
+  _ERR_CAPTURE_ACTIVE=1
+  exec > >(tee "$_ERR_STDOUT_FILE") 2>&1
+  return 0
+}
+_err_capture_stop() {
+  (( ${_ERR_CAPTURE_ACTIVE:-0} )) || return 0
+  _ERR_CAPTURE_ACTIVE=0
+  exec >&"$_ERR_TTY_OUT" 2>&"$_ERR_TTY_ERR" 2>/dev/null || true
+  return 0
+}
+
 # When this shell loaded the launcher. Used to spot a stale in-memory `err`
 # after the file changed on disk — `switch`/`help` live here, so a stale copy
 # silently ignores them until you reload.
@@ -301,14 +343,17 @@ _err_preexec() {
   _err_last_cmd="$c"
   _err_consumed=0
   _err_fresh=1
-  # Nothing is captured for a plain command, so an earlier capture must
-  # not be read as if it belonged to this one.
+  # Nothing is captured for a plain command unless `capture = on`; either way
+  # the previous command's capture must not be read as this one's.
   : >| "$_ERR_STDOUT_FILE" 2>/dev/null
   : >| "$_ERR_STDERR_FILE" 2>/dev/null
+  _err_capture_start
 }
 
 _err_precmd() {
   local ret=$?
+  # Restore the terminal before anything (prompt included) can write.
+  _err_capture_stop
   if (( _err_skip_exit )); then
     _err_skip_exit=0
     return

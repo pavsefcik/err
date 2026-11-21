@@ -76,13 +76,13 @@ After any command, `err wtf` explains what it did — and, if it failed, what to
 try instead. `err <question>` asks a shell or general question; `err new` and
 `err resume` manage the conversation that keeps follow-ups in context.
 
-**Output reaches the model one way: a pipe.** `ps aux | err wtf` hands the model
-what the command printed — err reads its own stdin and knows the producing
-command. A plain `err wtf` only has the command line and its exit code: the
-shell cannot capture stdout in a hook without turning fd 1 into a pipe, which
-breaks colours, pagers and full-screen programs (Atuin's pty-proxy exists for
-exactly this reason). Question mode attaches the last command, and whatever was
-piped in, as context — but only for the command that literally just ran.
+**Output reaches the model two ways.** Pipe it (`ps aux | err wtf`): err reads
+its own stdin and knows the producing command. Or set `capture = on` in
+`err.conf`: err then tees each command's stdout+stderr (last 40 lines) so a
+following `err wtf` or question can see it. Capture makes fd 1 a pipe while the
+command runs, so colours, pagers and full-screen programs (less, vim, btop,
+ssh) break — that is why it is opt-in. Question mode attaches the last command
+and its output as context for exactly one turn.
 
 ```sh
 ps aux | err wtf

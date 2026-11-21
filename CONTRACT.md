@@ -59,14 +59,13 @@ through the `err` function — never `eval` — so a menu row and the typed comm
 are the same code path. Off a terminal the engine prints the
 rows instead, which is what scripts and the tests consume.
 
-**Output reaches the model exactly one way: `cmd | err wtf`.** The launcher
-records the producing side of the pipeline (`_err_is_ours` only sees err when it
-is the *first* word), sets `_ERR_STDIN_PIPED=1`, and err.py reads its own stdin.
-**A plain command's output is never captured.** The shell would have to make
-fd 1 a pipe for the duration (`exec > >(tee …)`), which breaks colours, pagers
-and full-screen programs; Atuin's pty-proxy exists because that is the only real
-alternative. So `err wtf` after a plain command has the command line and the
-exit code only. `errc` was removed for exactly this reason: it *was* that pipe.
+**Output reaches the model two ways.** A pipe (`cmd | err wtf`): the launcher
+records the producing side (`_err_is_ours` only sees err when it is the *first*
+word), sets `_ERR_STDIN_PIPED=1`, and err.py reads its own stdin. Or the opt-in
+capture (`capture = on` in err.conf): `preexec` tees fd 1/2 into
+`_ERR_STDOUT_FILE` for that command and `precmd` restores the saved terminal
+fds. That tee is a real trade-off — fd 1 is a pipe while the command runs, so
+colours, pagers and full-screen programs break. Off by default.
 
 Captures are bounded (`output_lines`, default 40; 3000 chars) and cleared at
 `preexec` for every command err did not run itself. The question path attaches
@@ -107,7 +106,7 @@ them to the user message depending on the exit code.
 | `_ERR_LAST_CMD` | the command to explain |
 | `_ERR_LAST_EXIT` | its exit code (`-1` = unknown) |
 | `_ERR_STDERR_FILE` | file holding captured stderr (may not exist) |
-| `_ERR_STDOUT_FILE` | legacy capture file; nothing writes it now (always empty, truncated at every `preexec`) |
+| `_ERR_STDOUT_FILE` | command output: written by the opt-in capture (`capture = on`), truncated at every `preexec` |
 | `_ERR_STDIN_PIPED` | `1` when the recorded line ends in `| err …`: err.py may read its own stdin (bounded) |
 | `_ERR_LAST_FRESH` | `1` while the last command has not been explained/asked about |
 | `_ERR_SESSION_ID` | uuid, one per shell, minted by the launcher |

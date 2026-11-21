@@ -163,13 +163,12 @@ def main():
             "line would be fed to the suggestion channel",
         )
         check(
-            "never see the terminal" in errmod.DEFAULT_SYSTEM_PROMPT,
-            "the explain prompt must not claim to see terminal output",
+            "output err captured" in errmod.DEFAULT_SYSTEM_PROMPT,
+            "the explain prompt must name captured output",
         )
         check(
-            "not the terminal" in errmod.DEFAULT_QUESTION_PROMPT
-            and "piped into err" in errmod.DEFAULT_QUESTION_PROMPT,
-            "the question prompt must say only piped output reaches err",
+            "captured or that was piped" in errmod.DEFAULT_QUESTION_PROMPT,
+            "the question prompt must name captured output",
         )
         check(
             "Command: ls -la" in messages[-1]["content"],
