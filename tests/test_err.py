@@ -163,6 +163,15 @@ def main():
             "line would be fed to the suggestion channel",
         )
         check(
+            "never see the terminal" in errmod.DEFAULT_SYSTEM_PROMPT,
+            "the explain prompt must not claim to see terminal output",
+        )
+        check(
+            "not the terminal" in errmod.DEFAULT_QUESTION_PROMPT
+            and "piped into err" in errmod.DEFAULT_QUESTION_PROMPT,
+            "the question prompt must say only piped output reaches err",
+        )
+        check(
             "Command: ls -la" in messages[-1]["content"],
             "explain user content missing command",
         )

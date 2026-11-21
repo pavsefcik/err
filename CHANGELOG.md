@@ -73,6 +73,12 @@ All notable changes to err are documented here. Format follows
 
 ### Fixed
 
+- **The model no longer pretends it can see the terminal.** Both built-in
+  prompts now state that err supplies the command, its exit code, and only
+  output piped into err; a plain command's terminal output is not captured (a
+  tee would break colours, pagers and full-screen programs). Asked what it can
+  see, it points at `cmd | err wtf` instead of guessing.
+
 - **`err run` picked the Apple model and downloaded it from Hugging Face.**
   `_err_headless_run` tested for `apple-fm` only on an explicit argument, then
   fell through to the repo-download path for a picked one. The check now runs
