@@ -87,7 +87,8 @@ not_contains "err chat"      "$_out" "err chat is gone"
 not_contains "err tui"       "$_out" "err tui is gone"
 
 _out=$(cmd_out 'err help')
-contains "A glob matches filenames." "$_out" "err help is a prompt, not the menu"
+contains "start a fresh session" "$_out" "err help opens the menu"
+contains "err help" "$_out" "the menu lists err help as a typed command"
 contains "0.602.0" "$(cmd_out 'err version')" "err version prints VERSION"
 
 # ── 2. explain + ask reach the model ───────────────────────────────────

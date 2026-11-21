@@ -27,9 +27,10 @@ All notable changes to err are documented here. Format follows
 - **`err cleanup`** replaces `clear-cache`, with an `all` row that clears
   kv-cache, logs, sessions and chats together. An explicit target
   (`err cleanup all`, `err cleanup logs`) skips the picker.
-- **Ordinary words are prompts.** `err help` no longer opens the menu; bare
-  `err` and `err -h` do. `err chat`, `err menu` and `err tui` are not reserved
-  either, so they reach the model like any other question.
+- **`err help` opens the menu again.** It sits in the menu's typed-only header
+  with `err 'question'` and `err wtf` (not pickable — it would re-open the same
+  menu). `err chat`, `err menu` and `err tui` are still ordinary words and
+  reach the model like any other question.
 - **`err run` with no model is a status answer when one is serving:** it prints
   `arr // <model> already running` instead of opening the picker; switching is
   `err swap`. `err run <model>` still starts/replaces explicitly.

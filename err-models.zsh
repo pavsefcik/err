@@ -1706,9 +1706,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "err doctor|check the install"
   }
 
-  # The part of the menu that is not pickable: the two row types you can only
-  # type. They sit above the cursor's first row (`err new`), so ↑/↓ can never
-  # land on a row that would have to be re-dispatched as a placeholder.
+  # The part of the menu that is not pickable: commands you only type. They sit
+  # above the cursor's first row (`err new`), so ↑/↓ can never land on a row
+  # that would have to be re-dispatched as a placeholder. `err help` belongs
+  # here: picking it would just re-open this menu.
   _err_help_header() {
     local ver
     ver=$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')
@@ -1717,6 +1718,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "Available commands:"
     printf '       %-22s %s\n' "err 'question'" "ask a question"
     printf '       %-22s %s\n' "err wtf" "ask to explain or correct your last command"
+    printf '       %-22s %s\n' "err help" "show this menu"
   }
 
   _err_help_rows() {

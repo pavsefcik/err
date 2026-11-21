@@ -38,7 +38,7 @@ over free text** — `err run` is the model verb, never the question "run".
 
 | Invocation | Goes to |
 |---|---|
-| `err` · `-h` `--help` | `err-models.zsh helpmenu` (the interactive menu; rows printed off a TTY) |
+| `err` · `-h` `--help` `help` | `err-models.zsh helpmenu` (the interactive menu; rows printed off a TTY) |
 | `err wtf` | `err.py` (explain last command) |
 | `err <anything else>` | `err.py --ask "<text>"` |
 | `err new` · `resume [n]` | `err.py` (session verbs) |

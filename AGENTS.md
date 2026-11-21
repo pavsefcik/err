@@ -3,9 +3,9 @@
 `err` is two tools wearing one name:
 
 1. **explain / ask** — `err wtf`, `err "<question>"`, `cmd | err wtf`, plus
-   conversation sessions (`new` / `resume`). Bare `err` and `err -h` open the
-   interactive menu; `err help` is a prompt like any other non-verb. Runs on the
-   on-device Apple Foundation Model (`fm`), no API key.
+   conversation sessions (`new` / `resume`). Bare `err`, `err -h` and `err help`
+   open the interactive menu. Runs on the on-device Apple Foundation Model
+   (`fm`), no API key.
 2. **model manager** — `err run|swap|stop|list|info|download|remove|config|
    cleanup|uninstall|doctor` (plus hidden `version`/`ls`/`rm`), carried over
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
@@ -61,15 +61,14 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
    clients — do not reshape them, extend them. err's own action lines
    (`arr // …`) are human-facing: they go to stdout, and the colour is dropped
    when stdout is not a terminal.
-4. **`err` with no arguments opens the menu, and so does `err -h`.** The
-   engine owns the rows and the pickers (`_err_help_menu` in err-models.zsh);
-   it returns `<verb>\t<rest>` and the launcher re-dispatches it through `err`,
-   never `eval`, so the menu cannot drift from the typed command. Off a
-   terminal the engine prints the rows instead of a picker (`_err_help_rows`) —
-   that is what scripts and the tests see. The question and `wtf` lines are
-   shown in the header (`_err_help_header`) but are not pickable: the cursor's
-   first row is `err new` and cannot move above it. Explaining needs the word
-   (`wtf`).
+4. **`err` with no arguments opens the menu, and so do `err -h` and
+   `err help`.** The engine owns the rows and the pickers (`_err_help_menu` in
+   err-models.zsh); it returns `<verb>\t<rest>` and the launcher re-dispatches
+   it through `err`, never `eval`, so the menu cannot drift from the typed
+   command. Off a terminal the engine prints the rows instead of a picker
+   (`_err_help_rows`) — that is what scripts and the tests see. The question,
+   `wtf` and `help` lines are shown in the header (`_err_help_header`) but are
+   not pickable: the cursor's first row is `err new` and cannot move above it.
 5. **Reserved verbs win over free text.** `err run` is the model verb, never the
    question "run". Documented in the help text; do not "fix" it.
 6. **The launcher must survive being sourced into someone else's shell.** No

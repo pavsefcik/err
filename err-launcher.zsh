@@ -130,10 +130,11 @@ _err_update_rprompt() {
   fi
 }
 
-# Bare `err` / `err -h` is the interactive menu. The engine owns the rows and
-# the pickers (it already knows the models, the config and the running server);
-# it hands back one chosen line and this dispatches it by name. Never `eval`: a
-# row can only ever be one of err's own verbs, and the menu cannot drift from
+# Bare `err` / `err -h` / `err help` is the interactive menu. The engine owns
+# the rows and the pickers (it already knows the models, the config and the
+# running server); it hands back one chosen line and this dispatches it by
+# name. Never `eval`: a row can only ever be one of err's own verbs, and the
+# menu cannot drift from
 # what typing the same command does.
 _err_help_interactive() {
   # The pick cannot come back through `$( )`: that makes stdout a pipe, and the
@@ -372,7 +373,7 @@ err() {
   done
   case "$verb" in
     version|-v|-V|--version) _err_version; return 0 ;;
-    -h|--help)            _err_help_interactive; return $? ;;
+    help|-h|--help)       _err_help_interactive; return $? ;;
   esac
 
   # ---- session verbs ----

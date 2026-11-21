@@ -34,12 +34,14 @@ Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.comman
 ```
 err                            the menu (bare)
 err -h                         the menu as well
+err help                       the menu, typed
 
 err // 0.602.0 // local MLX LLM runner
 
 Available commands:
        err 'question'         ask a question
        err wtf                ask to explain or correct your last command
+       err help               show this menu
 
        err new                start a fresh session
        err resume             resume a session
@@ -56,14 +58,13 @@ Available commands:
        err doctor             check the install
 ```
 
-`err` and `-h` open the same interactive menu: arrow to a row,
-Enter to run it. The rows are the commands themselves, so typing
+`err`, `err -h` and `err help` open the same interactive menu: arrow to a
+row, Enter to run it. The rows are the commands themselves, so typing
 `err run <model>` from the shell does the same thing. Off a terminal (a script,
-a pipe) the menu prints the same list instead of opening a picker. The question
-and `wtf` lines are shown, but they are typed directly — the cursor starts at
-`err new` and never moves onto them. `err help` is a question like any other
-word — only bare `err` and `-h` open the menu, so ordinary prompt words stay
-free.
+a pipe) the menu prints the same list instead of opening a picker. The
+question, `wtf` and `help` lines are shown, but they are typed directly — the
+cursor starts at `err new` and never moves onto them (`err help` would just
+re-open this menu).
 
 `err` with a leading word that is one of the verbs always runs the verb, so a
 question that starts with one needs quoting: `err 'why did that fail?'`.

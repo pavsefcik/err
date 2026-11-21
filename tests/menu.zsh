@@ -160,6 +160,7 @@ contains "local MLX LLM runner" "$_out" "the header names the version"
 contains "Available commands:" "$_out" "the typed-only section has a heading"
 contains "err 'question'" "$_out" "the question row is shown (typed, not picked)"
 contains "err wtf" "$_out" "the wtf row is shown (typed, not picked)"
+contains "err help" "$_out" "the help row is shown (typed, not picked)"
 contains "err run <model>" "$_out" "the menu offers err run"
 contains "err cleanup" "$_out" "the menu offers err cleanup"
 contains "err config" "$_out" "the menu offers err config"
@@ -207,9 +208,9 @@ contains "start a fresh session" "$_out" "the plain rows keep their descriptions
 contains "Available commands:" "$_out" "the plain help keeps the section heading"
 contains "err 'question'" "$_out" "the question row is shown but not pickable"
 contains "err wtf" "$_out" "the wtf row is shown but not pickable"
+contains "err help" "$_out" "the help row is shown but not pickable"
 not_contains "err chat" "$_out" "the chat row is gone"
 not_contains "err tui" "$_out" "the tui row is gone"
-not_contains "err help" "$_out" "the help row is gone (help is a prompt)"
 
 # ── cancel must abort, not fall through ───────────────────────────────
 print "cancel"

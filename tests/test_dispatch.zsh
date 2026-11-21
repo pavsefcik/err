@@ -65,7 +65,7 @@ _check "version" "${_CALLS[1]:-}" "err -v"
 _CALLS=(); err -h >/dev/null 2>&1
 _check "helpmenu" "${_CALLS[1]:-}" "err -h opens the menu"
 _CALLS=(); err help >/dev/null 2>&1
-_check "py:--ask help" "${_CALLS[1]:-}" "err help is a prompt, not a command"
+_check "helpmenu" "${_CALLS[1]:-}" "err help opens the menu"
 
 print "free text -> ask"
 _CALLS=()
