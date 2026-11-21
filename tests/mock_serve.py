@@ -8,6 +8,7 @@ Env: MOCK_REPLY  text streamed back (chunked); defaults to an answer with a
                  fenced block so err.py's suggestion channel is exercised.
 """
 
+import json
 import os
 import signal
 import sys
@@ -46,9 +47,15 @@ def main() -> int:
     while True:
         time.sleep(0.2)
         # Requests are appended to state.requests; expose the count so the
-        # shell test can assert the launcher really reached the server.
+        # shell test can assert the launcher really reached the server, and the
+        # last body so it can assert what the model was actually told.
         with open(port_file + ".count", "w") as f:
             f.write(str(len(state.requests)))
+        if state.requests:
+            last = port_file + ".last"
+            with open(last + ".tmp", "w") as f:
+                json.dump(state.requests[-1], f, indent=1)
+            os.replace(last + ".tmp", last)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ test-py:
 	@echo "== err.py =="
 	@python3 tests/test_err.py
 
-# Menus: the real picker code driven by a fake gum (rows, star, cancel, choice).
+# Menus: the real picker code (rows, cursor, cancel, choice), no toolkit.
 test-menu:
 	@echo "== menus =="
 	@zsh tests/menu.zsh

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,9 +40,11 @@ def main():
     sid = str(uuid.uuid4())
     tokens_file = os.path.join(tmp, "tokens")
     tokens_file_2 = os.path.join(tmp, "tokens2")
+    turns_file = os.path.join(tmp, "turns")
     suggest_file = os.path.join(tmp, "suggest")
     session_id_file = os.path.join(tmp, "session_id")
     stderr_file = os.path.join(tmp, "stderr")
+    stdout_file = os.path.join(tmp, "stdout")
 
     base_env = {
         "ERR_STATE_DIR": tmp,
@@ -52,6 +55,7 @@ def main():
         "ERR_MLX_MODEL": "mock/model",
         "_ERR_SESSION_ID": sid,
         "_ERR_TOKENS_FILE": tokens_file,
+        "_ERR_TURNS_FILE": turns_file,
         "_ERR_SUGGEST_FILE": suggest_file,
         "_ERR_SESSION_ID_FILE": session_id_file,
         "_ERR_STDERR_FILE": stderr_file,
@@ -87,11 +91,53 @@ def main():
         redacted = errmod.redact("export GITHUB_TOKEN=ghp_abc123XYZ")
         check("ghp_abc123XYZ" not in redacted, "raw github token survived redaction")
         check("«redacted»" in redacted, "redaction marker missing")
+        check(errmod.tail_output("a\nb\nc", 2) == "b\nc", "tail_output line bound")
+        check(errmod.tail_output("q", 10, 1).endswith("q"), "tail_output char bound")
+        check(errmod.build_ask_user("q") == "q", "a question with no command must stay bare")
         check(
             errmod.first_fenced_line("Try:\n```bash\nls -la\n```\n") == "ls -la",
             "first fenced line extraction",
         )
         ok("redact + fenced extraction")
+
+        # ── unit: readiness + error bodies ────────────────────────────
+        code, msg = errmod.http_error_detail(
+            '{"detail":{"code":"model_loading","message":"Startup preloading is in progress"}}'
+        )
+        check(code == "model_loading", "model_loading code not parsed")
+        check(msg == "Startup preloading is in progress", "error message not unwrapped")
+        check(errmod.http_error_detail("plain text") == ("", "plain text"),
+              "non-JSON error body not passed through")
+        # No /health on the mock: readiness must fall back to /v1/models.
+        check(errmod.mlx_ready(base_url) is True,
+              "mlx_ready must accept a server without /health")
+        state.model_ready = False
+        check(errmod.mlx_ready(base_url) is False,
+              "mlx_ready ignored /health's model_ready=false")
+        state.model_ready = True
+        check(errmod.mlx_ready(base_url) is True,
+              "mlx_ready ignored /health's model_ready=true")
+        state.model_ready = None
+        ok("readiness + error body parsing")
+
+        # A server that answers /v1/models while still preloading rejects the
+        # first chat with 503 model_loading. That is a wait, not a failure.
+        state.reply = "A glob matches filenames."
+        state.loading_attempts = 1
+        proc = run(["--ask", "what is a glob"],
+                   {"_ERR_SESSION_ID": str(uuid.uuid4())})
+        check(proc.returncode == 0, f"503 model_loading not retried: {proc.stderr}")
+        check("A glob matches filenames." in proc.stdout,
+              "answer missing after the loading retry")
+        check("starting mock/model on " in proc.stderr,
+              "the loading wait was not announced")
+        check("ready mock/model on " in proc.stderr,
+              "the loading wait did not settle on a ready line")
+        check(proc.stdout.startswith("arr // "),
+              "the answer is not introduced by the arr // prefix")
+        check("\033" not in proc.stdout,
+              "the answer prefix leaked colour into a pipe")
+        ok("503 model_loading is waited out")
 
         # ── explain mode: messages, session turn, usage tokens ───────
         state.reply = "It lists files."
@@ -105,6 +151,17 @@ def main():
         )
         messages = request["messages"]
         check(messages[0]["role"] == "system", "system prompt not first")
+        # The prompt in force comes from one definition (err.py); err.conf may
+        # override it but must not duplicate it, or the copies drift apart.
+        check(
+            messages[0]["content"] == errmod.DEFAULT_SYSTEM_PROMPT,
+            "explain did not send the built-in system prompt",
+        )
+        check(
+            "code block" in errmod.DEFAULT_SYSTEM_PROMPT.lower(),
+            "the explain prompt must refuse a code block: its first fenced "
+            "line would be fed to the suggestion channel",
+        )
         check(
             "Command: ls -la" in messages[-1]["content"],
             "explain user content missing command",
@@ -128,6 +185,10 @@ def main():
         check(proc.returncode == 0, f"ask failed: {proc.stderr}")
         request = state.requests[-1]
         check(
+            request["messages"][0]["content"] == errmod.DEFAULT_QUESTION_PROMPT,
+            "ask did not send the built-in question prompt",
+        )
+        check(
             request["messages"][-1]["content"] == "how do I list files",
             "ask question not the final user message",
         )
@@ -143,11 +204,106 @@ def main():
         check(read(suggest_file) == "ls -la", "suggested command not written")
         ok("ask mode + history + suggestion")
 
+        # ── captured output: what a command printed reaches the model ─
+        # `ps aux | head | err why`: the launcher marks the stdin pipe and err
+        # reads it. The exit code is unknown on purpose — a pipeline's status
+        # is not the producer's.
+        state.reply = "The load is high on three processes."
+        proc = run([], {"_ERR_LAST_CMD": "ps aux | head",
+                       "_ERR_LAST_EXIT": "-1",
+                       "_ERR_STDIN_PIPED": "1"},
+                   stdin="USER PID %CPU\npavel 44594 9.4\n")
+        check(proc.returncode == 0, f"piped explain failed: {proc.stderr}")
+        user = state.requests[-1]["messages"][-1]["content"]
+        check("Output (last lines):" in user, "piped output not labelled in the prompt")
+        check("pavel 44594 9.4" in user, "piped output did not reach the model")
+        check("Exit code: unknown" in user, "a piped command claimed a known exit code")
+
+        # `errc`'s capture file, bounded to the tail (the model gets the shape
+        # of the output, not 200 lines of it).
+        with open(stdout_file, "w") as f:
+            f.write("\n".join("row %d" % i for i in range(200)) + "\n")
+        proc = run([], {"_ERR_LAST_CMD": "errc ps aux", "_ERR_LAST_EXIT": "0",
+                       "_ERR_STDOUT_FILE": stdout_file})
+        user = state.requests[-1]["messages"][-1]["content"]
+        check("row 199" in user, "captured stdout tail missing")
+        check("row 159" not in user, "captured stdout not bounded to the tail")
+        ok("captured output reaches the explain prompt")
+
+        # ── question mode carries the last command as context ────────
+        state.reply = "Looks like ten busy processes."
+        proc = run(["--ask", "what is going on"],
+                   {"_ERR_LAST_CMD": "ps aux | head", "_ERR_LAST_EXIT": "0",
+                    "_ERR_LAST_FRESH": "1", "_ERR_STDOUT_FILE": stdout_file})
+        check(proc.returncode == 0, f"context ask failed: {proc.stderr}")
+        user = state.requests[-1]["messages"][-1]["content"]
+        check("the command I just ran" in user, "question lost the last command context")
+        check("Command: ps aux | head" in user, "question context missing the command")
+        check("row 199" in user, "question context missing captured output")
+        check("Question: what is going on" in user, "question text not last")
+
+        # Stale context must not leak: once err has answered, the launcher
+        # clears _ERR_LAST_FRESH and the next question is bare.
+        proc = run(["--ask", "what is a glob"],
+                   {"_ERR_LAST_CMD": "ps aux | head", "_ERR_STDOUT_FILE": stdout_file})
+        check(state.requests[-1]["messages"][-1]["content"] == "what is a glob",
+              "non-fresh command leaked into a later question")
+        ok("question context is one turn only")
+
+        # ── one prompt, one source: defaults live in err.py ──────────
+        # err.conf carries no prompt text by default; `err doctor` asks err.py
+        # what is in force. Overrides are read from either key, the new one
+        # winning, and the merged text is what the launcher's doctor row shows.
+        prompt_conf = os.path.join(tmp, "prompt.conf")
+        with open(prompt_conf, "w") as f:
+            f.write("model_id = system\n")
+
+        def prompt(kind, conf=prompt_conf):
+            proc = run(["--prompt", kind], {"ERR_CONF": conf})
+            check(proc.returncode == 0, f"--prompt {kind} failed: {proc.stderr}")
+            origin, _, text = proc.stdout.rstrip("\n").partition("\t")
+            return origin, text
+
+        origin, text = prompt("explain")
+        check(origin == "builtin", f"empty conf should be builtin, got {origin!r}")
+        check(text == errmod.DEFAULT_SYSTEM_PROMPT, "builtin explain text changed")
+        origin, text = prompt("question")
+        check(origin == "builtin", f"empty conf should be builtin, got {origin!r}")
+        check(text == errmod.DEFAULT_QUESTION_PROMPT, "builtin question text changed")
+
+        with open(prompt_conf, "w") as f:
+            f.write("system_prompt = Legacy explain.\n")
+        check(prompt("explain") == ("custom", "Legacy explain."),
+              "the legacy system_prompt key is no longer read")
+
+        with open(prompt_conf, "w") as f:
+            f.write("system_prompt = Legacy explain.\n"
+                    "explain_system_prompt = New explain.\n")
+        check(prompt("explain") == ("custom", "New explain."),
+              "explain_system_prompt must win over system_prompt")
+
+        with open(prompt_conf, "w") as f:
+            f.write("question_system_prompt = Answer in one word.\n")
+        check(prompt("question") == ("custom", "Answer in one word."),
+              "question_system_prompt override ignored")
+        proc = run(["--prompt", "bogus"], {"ERR_CONF": prompt_conf})
+        check(proc.returncode == 2, "--prompt bogus should exit 2")
+
+        # The shipped err.conf must not restate the defaults: that was the
+        # duplication that made drift invisible.
+        shipped = read(os.path.join(REPO, "err.conf"))
+        for word in ("You explain what a shell command did",
+                     "You answer shell questions"):
+            check(word not in shipped,
+                  "err.conf duplicates a built-in prompt: " + word)
+        ok("prompts come from one source, both keys honoured")
+
         # ── session round-trip persists and reloads turns ────────────
         sess = json.loads(read(session_file(sid)))
-        check(len(sess["turns"]) == 2, "session did not accumulate two turns")
+        check(len(sess["turns"]) >= 2, "session did not accumulate turns")
         check(sess["turns"][0]["q"].startswith("Command: ls -la"), "turn q lost")
         check(sess["turns"][0]["a"] == "It lists files.", "turn a lost")
+        check(sess["turns"][1]["q"] == "how do I list files", "ask turn q lost")
         ok("session round-trip")
 
         # ── redaction happens before persisting ──────────────────────
@@ -165,7 +321,11 @@ def main():
         check(proc.returncode == 0, f"resume failed: {proc.stderr}")
         rows = [line for line in proc.stdout.splitlines() if line.strip()]
         check(bool(rows), "resume printed no rows")
-        check(rows[0].strip().startswith("1."), f"resume row malformed: {rows[0]!r}")
+        # A row is a command: `err resume 1  <age>  <tty>  <cwd>  <title>`.
+        check(rows[0].strip().startswith("err resume 1 "),
+              f"resume row malformed: {rows[0]!r}")
+        check("resume 1" in proc.stdout and "ls -la" in proc.stdout,
+              "resume row does not carry the session title")
         check(REPO in rows[0], "resume row missing cwd")
         ok("resume listing")
 
@@ -191,7 +351,33 @@ def main():
         check("\n" not in new_id, "session id file has more than one line")
         uuid.UUID(new_id)  # raises if not a uuid
         check(os.path.isfile(session_file(new_id)), "new session file not created")
+        check(read(turns_file).strip() == "0", "new did not publish 0 turns")
+        check(read(tokens_file).strip() == "0", "new did not publish 0 tokens")
+        check("new session" in proc.stdout, "new did not confirm the reset")
+        with open(session_file(new_id)) as f:
+            fresh = json.load(f)
+        check(fresh.get("turns") == [], "new session started with turns")
+        # And it must really be empty on the next ask: no history from `sid`.
+        state.reply = "Fresh start."
+        proc = run(["--ask", "anything"], {"_ERR_SESSION_ID": new_id})
+        check(proc.returncode == 0, f"ask after new failed: {proc.stderr}")
+        msgs = state.requests[-1].get("messages", [])
+        check([m.get("role") for m in msgs] == ["system", "user"],
+              f"ask after new carried history: {msgs}")
+        check(read(turns_file).strip() == "1", "ask did not publish 1 turn")
+        check(read(tokens_file).strip() != "0", "ask did not publish its tokens")
         ok("new writes _ERR_SESSION_ID_FILE")
+
+        # `err stop` calls this: mint a session silently and reset both files.
+        reset_file = os.path.join(tmp, "reset_session_id")
+        proc = run(["--reset-session"], {"_ERR_SESSION_ID_FILE": reset_file})
+        check(proc.returncode == 0, f"--reset-session failed: {proc.stderr}")
+        check(proc.stdout == "", f"--reset-session was not silent: {proc.stdout!r}")
+        reset_id = read(reset_file).strip()
+        uuid.UUID(reset_id)
+        check(read(turns_file).strip() == "0", "reset did not clear the turn count")
+        check(read(tokens_file).strip() == "0", "reset did not clear the token count")
+        ok("--reset-session clears the counters silently")
 
         # ── delete declines cleanly, then removes on confirmation ────
         proc = run(["delete"], stdin="n\n")
@@ -299,6 +485,79 @@ def main():
                 else:
                     os.environ[k] = v
         ok("mlx autostart opt-out")
+
+        # ── idle watchdog: every server err starts gets shut down ────
+        # A server nothing ever touches must die after idle_timeout_minutes;
+        # one whose heartbeat keeps being stamped must not. ERR_WATCHDOG_POLL
+        # keeps this to a few seconds instead of the production 20 s tick.
+        wd = tempfile.mkdtemp(prefix="err-watchdog-", dir=tmp)
+        wd_conf = os.path.join(wd, "err.conf")
+        with open(wd_conf, "w") as f:
+            f.write("idle_timeout_minutes = 0.05\n")
+        wd_env = dict(os.environ)
+        wd_env.update({
+            "ERR_CONF": wd_conf,
+            "ERR_STATE_DIR": wd,
+            "ERR_WATCHDOG_POLL": "0.2",
+        })
+
+        def arm(pid, port=None):
+            args = [sys.executable, ERR_PY, "--watchdog", str(pid)]
+            if port is not None:
+                args.append(str(port))
+            return subprocess.run(
+                args, cwd=REPO, env=wd_env, capture_output=True, text=True,
+                timeout=30,
+            )
+
+        idle = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            check(arm(idle.pid).returncode == 0, "arming the watchdog failed")
+            for _ in range(60):
+                if idle.poll() is not None:
+                    break
+                time.sleep(0.25)
+            check(idle.poll() is not None,
+                  "an idle server survived past idle_timeout_minutes")
+        finally:
+            if idle.poll() is None:
+                idle.kill()
+            idle.wait()
+
+        busy = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            check(arm(busy.pid).returncode == 0, "arming the watchdog failed")
+            hb = os.path.join(wd, "fm_heartbeat")
+            for _ in range(24):              # ~6 s = 3x the idle timeout
+                with open(hb, "w") as f:
+                    f.write("1")
+                if busy.poll() is not None:
+                    break
+                time.sleep(0.25)
+            check(busy.poll() is None,
+                  "a busy server (fresh heartbeat) was killed")
+        finally:
+            if busy.poll() is None:
+                busy.kill()
+            busy.wait()
+        ok("idle watchdog reaps idle servers, spares busy ones")
+
+        # A client err knows nothing about (curl, pi, another app) stamps no
+        # heartbeat and may not hold a connection open, so CPU is the last
+        # safety net: a server that generates tokens burns some.
+        worker = subprocess.Popen(
+            [sys.executable, "-c", "while True: pass"])
+        try:
+            check(arm(worker.pid, 11599).returncode == 0,
+                  "arming a port watchdog failed")
+            time.sleep(3.5)                    # > 3x the idle timeout
+            check(worker.poll() is None,
+                  "a CPU-busy server (no heartbeat, no connection) was killed")
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+            worker.wait()
+        ok("idle watchdog spares a server that is burning CPU")
 
         print(f"\nALL {len(passed)} TESTS PASSED")
         return 0

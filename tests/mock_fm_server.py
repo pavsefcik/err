@@ -15,6 +15,11 @@ class MockState:
         self.requests = []
         self.reply = "OK."
         self.usage_total = None  # None => omit usage, forcing client-side estimate
+        # mlx-vlm facts: /health reports model_ready (None => no /health at all,
+        # i.e. an older/other OpenAI server), and startup preload rejects the
+        # first chat request(s) with 503 model_loading.
+        self.model_ready = None
+        self.loading_attempts = 0
 
 
 def make_handler(state):
@@ -30,8 +35,15 @@ def make_handler(state):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.split("?")[0] == "/v1/models":
+            path = self.path.split("?")[0]
+            if path == "/v1/models":
                 self._send_json(200, {"object": "list", "data": [{"id": "mock-model"}]})
+            elif path == "/health" and state.model_ready is not None:
+                self._send_json(200, {
+                    "status": "healthy",
+                    "model_ready": state.model_ready,
+                    "preload_in_progress": not state.model_ready,
+                })
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -45,6 +57,13 @@ def make_handler(state):
                 body = json.loads(raw.decode("utf-8"))
             except json.JSONDecodeError:
                 body = {"_raw": raw.decode("utf-8", "replace")}
+            if state.loading_attempts > 0:
+                state.loading_attempts -= 1
+                self._send_json(503, {"detail": {
+                    "code": "model_loading",
+                    "message": "Startup preloading is in progress",
+                }})
+                return
             state.requests.append(body)
 
             self.send_response(200)

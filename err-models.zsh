@@ -8,10 +8,6 @@ unsetopt xtrace verbose 2>/dev/null
 # here, so we won't kill what we didn't start.
 typeset -ga _ERR_SESSION_PIDS=()
 
-# Port chosen by the most recent _err_launch (for callers that need to know
-# where a freshly launched model landed, e.g. parallel runs).
-typeset -g _ERR_LAST_LAUNCH_PORT=""
-
 # Self-contained helpers (no dependence on err()'s locals) live in lib/.
 local _ERR_SRC_DIR="${0:A:h}"
 source "$_ERR_SRC_DIR/lib/err-helpers.zsh"
@@ -21,29 +17,28 @@ _err_engine_main() {
   local hub_dir="${ERR_HUB_DIR:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
   local state_dir="${ERR_STATE_DIR:-$HOME/.cache/err}"
   local log_dir="$state_dir/logs"
-  local config_file="$state_dir/config.zsh"
+  local config_file="$state_dir/err.conf"
   local chat_dir="$state_dir/chats"
 
   typeset -ga ERR_CHAT_FLAGS=( --max-tokens 2048 --temperature 0.7 )
   typeset -ga ERR_SERVER_FLAGS=()
 
   # Version query: handled before the tool check so it works even on a
-  # half-broken install — reporting the version shouldn't depend on gum/uvx.
+  # half-broken install — reporting the version shouldn't depend on uvx.
   if [[ $# -eq 1 && "$1" == (-v|--version|-V|version) ]]; then
     print "$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
     return 0
   fi
 
   # cache/clean are on-disk reporting + hygiene. Like version, they must work on
-  # a half-broken install (no gum/uv/mlx-vlm), and `clean` must not depend on a
+  # a half-broken install (no uv/mlx-vlm), and `clean` must not depend on a
   # tool check — so they are handled here, before it. Both keep the CLI contract:
   # data on stdout, errors on stderr, exit 0 ok / 1 failure / 2 usage error.
   if [[ "${1:-}" == (cache|clean) ]]; then
     _err_migrate_legacy_state
-    # Source config.zsh here too (not only on the main path) so the report and
-    # clean see ERR_APC / APC_* overrides set there. No state dirs are
-    # created: cache only reads and clean removes what already exists.
-    [[ -r "$config_file" ]] && source "$config_file"
+    # The report and clean read APC overrides from the one config file. No
+    # state dirs are created here: cache only reads, clean removes. (The config
+    # is loaded by the main path; here we only need the APC env.)
     case "$1" in
       cache) _err_cache_cmd "$state_dir" "$hub_dir" "$log_dir" "${@:2}" ;;
       clean) _err_clean_cmd "$state_dir" "$hub_dir" "${@:2}" ;;
@@ -52,7 +47,7 @@ _err_engine_main() {
   fi
 
   local cmd missing=()
-  for cmd in gum curl uvx mlx_vlm.server; do
+  for cmd in curl uvx mlx_vlm.server; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if (( ${#missing[@]} > 0 )); then
@@ -73,7 +68,7 @@ _err_engine_main() {
       print -u2 "err: missing required tool(s): ${missing[*]}"
       print -u2 ""
       print -u2 "Install with:"
-      print -u2 "  brew install uv gum && uv tool install mlx-vlm --with jinja2"
+      print -u2 "  install uv (https://astral.sh/uv), then: uv tool install mlx-vlm --with jinja2"
       return 1
     fi
   fi
@@ -85,265 +80,133 @@ _err_engine_main() {
 
   mkdir -p "$state_dir" "$log_dir" "$chat_dir"
 
-  # The curated download list ships bundled in this repo (`curated-llms.md`), but
+  # The curated download list ships bundled in this repo (`err-curator.md`), but
   # upstream can add models between releases, so an interactive startup refreshes
   # a cached copy from GitHub (`_err_catalog_sync`: TTL-gated, ~5s timeout,
   # offline keeps what we have). The cache sits at the legacy path sibling tools
-  # read (`~/.cache/err/curated-llms.md`) and is what the Download menu and
-  # `err curated` serve. A `ERR_CATALOG` override points at a different
+  # read (`~/.cache/err/err-curator.md`) and is what the Download menu and
+  # `err download` serve. A `ERR_CATALOG` override points at a different
   # list and disables the refresh; ERR_CATALOG_TTL (seconds, 0 = every run,
   # `never` = off) and ERR_CATALOG_URL tune it.
   local curated_file="${ERR_CATALOG:-}"
   if [[ -z "$curated_file" ]]; then
     # Never fetch on a headless verb: `err run` sits on pi's model_select
     # path and must stay fast. Seeding from the bundled copy still happens, so
-    # headless verbs read the same (last fetched) list as the TUI.
+    # headless verbs read the same (last fetched) list as `err download`.
     local catalog_url=""
     (( $# == 0 )) && catalog_url="${ERR_CATALOG_URL:-$_ERR_CATALOG_URL_DEFAULT}"
-    if _err_catalog_sync "$_ERR_SRC_DIR/curated-llms.md" \
-         "$state_dir/curated-llms.md" "$catalog_url" "${ERR_CATALOG_TTL:-3600}"; then
-      curated_file="$state_dir/curated-llms.md"
+    if _err_catalog_sync "$_ERR_SRC_DIR/err-curator.md" \
+         "$state_dir/err-curator.md" "$catalog_url" "${ERR_CATALOG_TTL:-3600}"; then
+      curated_file="$state_dir/err-curator.md"
     else
-      curated_file="$_ERR_SRC_DIR/curated-llms.md"
+      curated_file="$_ERR_SRC_DIR/err-curator.md"
     fi
   fi
 
-  _err_write_default_config() {
-    cat > "$1" <<'CFG'
-# err config — sourced on startup. Use "Basic settings" in the main menu for the
-# common toggles (thinking / temp / max-tokens / system prompt); they live in
-# the managed block below and err rewrites it. Hand-edit anything below the
-# block to add advanced flags — see `mlx_vlm.chat --help` / `mlx_vlm.server --help`.
-# --model / --port / --host are managed by err (prefers :11500; parallel runs
-# take the next free port).
-
-# >>> err-managed quick settings — edit via "Basic settings" <<<
-ERR_QUICK_THINKING="default"      # default | on | off  (default = use model's built-in)
-ERR_QUICK_TEMP=""                 # e.g. 0.7, or empty to use ERR_CHAT_FLAGS default
-ERR_QUICK_MAX_TOKENS=""           # e.g. 2048, or empty to use ERR_CHAT_FLAGS default
-ERR_QUICK_SYSTEM_PROMPT=""        # chat only; empty disables
-ERR_QUICK_MOE_CACHE=""            # GiB for streaming MoE experts (empty = 6)
-# <<< end err-managed >>>
-
-# CHAT_FLAGS are informational: the built-in REPL talks to the running server
-# over HTTP, so the SERVER_FLAGS below are the ones that take effect at runtime.
-# Thinking is per-model-family: err resolves it at launch and per request
-# (see the "Thinking" quick setting), so it is not written here.
-ERR_CHAT_FLAGS=(
-  --max-tokens 2048
-  --temperature 0.7
-  # --thinking-budget 100
-  # --thinking-mode enabled
-  # --max-kv-size 4096
-  # --kv-bits 8
-  # --kv-quant-scheme turboquant
-  # --quantized-kv-start 2048
-)
-
-ERR_SERVER_FLAGS=(
-  # --max-tokens 2048
-  # --thinking-budget 100
-  # --draft-model mlx-community/some-draft-model
-  # --draft-kind dflash
-  # --max-num-seqs 1
-  # --kv-bits 8
-  # --kv-quant-scheme turboquant
-  # --max-kv-size 4096
-  # --quantized-kv-start 2048
-  # --prefill-step-size 2048
-  # --vision-cache-size 100
-  # --adapter-path /path/to/adapter
-  # --image-model mlx-community/some-image-model    # preload alongside the chat model
-  # --tts-model mlx-community/some-tts-model        # preload text-to-speech
-  # --stt-model mlx-community/some-stt-model        # preload speech-to-text
-  # --embedding-model mlx-community/some-embedder
-  # --reranker-model mlx-community/some-reranker
-  # --trust-remote-code
-  # --log-level INFO
-)
-
-# Automatic Prefix Caching (APC): err enables mlx-vlm's prefix cache so a
-# new turn only prefills the new tokens instead of the whole conversation.
-# mlx_vlm.server has no CLI flag for this, so these are environment variables
-# exported right before the server starts. Uncomment to override a default, or
-# set ERR_APC=0 to disable APC entirely.
-# APC_ENABLED=1
-# APC_DISK_ENABLED=1
-# APC_DISK_PATH="$HOME/.cache/err/apc"
-# APC_DISK_MAX_GB=5
-# APC_NUM_BLOCKS=2048
-# APC_CHECKPOINT_INTERVAL_TOKENS=512
-# APC_CHECKPOINT_ENTRIES=2
-CFG
-  }
 
   typeset -g ERR_QUICK_THINKING="default"
   typeset -g ERR_QUICK_TEMP=""
   typeset -g ERR_QUICK_MAX_TOKENS=""
   typeset -g ERR_QUICK_SYSTEM_PROMPT=""
   typeset -g ERR_QUICK_MOE_CACHE=""
-  typeset -g _ERR_TMP_CFG=""
   typeset -g _ERR_STTY_SAVED=""
-  typeset -g _ERR_MENU_QUIT=0
-  typeset -gi _ERR_BYE_LEFT_RUNNING=0
-  typeset -gi _ERR_HF_SKIPPED=0
-  typeset -g _ERR_MENU_KEY=""
-  typeset -ga _ERR_MENU_LINES=()
-  typeset -ga _ERR_MENU_KINDS=()
-  typeset -ga _ERR_MENU_MODELS=()
-  typeset -ga _ERR_MENU_PORTS=()
-  typeset -ga _ERR_MENU_ACTIONS=()
-  typeset -ga _ERR_MENU_PAIRS=()
-  typeset -gi _ERR_MENU_CURSOR=0
-  typeset -gi _ERR_MENU_SCROLL=0
-  typeset -gi _ERR_MENU_VIS=10
-  typeset -gi _ERR_MENU_WIDTH=80
-  typeset -gi _ERR_MENU_DRAWN=0
-  typeset -gi _ERR_MENU_NLINES=0
-  typeset -gi _ERR_MENU_NO_MODELS=0
-  typeset -g _ERR_UPDATE_NEW=""
-  typeset -g _ERR_UPDATE_INSTALLED=""
   _ERR_STTY_SAVED="$(stty -g 2>/dev/null)"
 
-  _err_talk_info() {
-    local m="$1" p="$2"
-    gum style --foreground 212 --bold "Use from another app"
-    echo "  Drop-in OpenAI-compatible endpoint. Most apps that work with OpenAI"
-    echo "  accept these three values — paste them where the app asks for them:"
-    echo
-    echo "    Base URL:   http://localhost:$p/v1"
-    echo "    Model:      $m"
-    echo "    API key:    not required (use any non-empty string if asked)"
-    echo
-    gum style --foreground 244 "  Quick test from a terminal:"
-    gum style --foreground 244 "    curl -s http://localhost:$p/v1/chat/completions \\"
-    gum style --foreground 244 "      -H 'Content-Type: application/json' \\"
-    gum style --foreground 244 "      -d '{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
-  }
-
-  _err_chat_repl() {
-    local model="$1" port="$2"
-    local resume="${3:-}"
-    if ! command -v python3 >/dev/null 2>&1; then
-      gum style --foreground 196 "python3 not found — install Xcode Command Line Tools (xcode-select --install) to use the built-in chat."
-      _err_pause
-      return 1
-    fi
-    if [[ ! -f "$_ERR_SRC_DIR/lib/err_repl.py" ]]; then
-      gum style --foreground 196 "chat REPL missing ($_ERR_SRC_DIR/lib/err_repl.py) — re-run install.sh or /err-setup."
-      _err_pause
-      return 1
-    fi
-    local sysp="$ERR_QUICK_SYSTEM_PROMPT"
-    local rc ministral_other co chat_log url friendly spec control markers rf
-    while true; do
-      sysp="$ERR_QUICK_SYSTEM_PROMPT"
-      url="http://127.0.0.1:$port/v1/chat/completions"
-      friendly=$(_err_display_name "$model")
-      local thinking="${ERR_QUICK_THINKING:-default}"
-      local stamp safe
-      # Ministral ships as an Instruct+Reasoning pair; tab swaps to the sibling
-      # (the REPL exits 3 to request it).
-      ministral_other=""
-      if [[ "${model##*/}" == *-Instruct-* || "${model##*/}" == *-Reasoning-* ]]; then
-        co=$(_err_ministral_sibling "$model")
-        [[ -d "$hub_dir/models--${co//\//--}" ]] && ministral_other="$co"
-      fi
-      # Thinking is per-family. Only an explicit "on" shows a reasoning trace
-      # (both "default" and "off" hide it). The family decides the control knob
-      # and the inline marker set; the REPL gets both.
-      spec=$(_err_thinking_spec "$model" "$hub_dir")
-      control="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
-      markers="${spec%%$'\t'*}"; rf="${spec#*$'\t'}"
-      local is_reasoning=0
-      [[ "$rf" == "1" ]] && is_reasoning=1
-      local thinking_disp="off"
-      [[ "$thinking" == "on" ]] && thinking_disp="on"
-      if [[ -n "$resume" && -f "$resume" ]]; then
-        # Resume: append to the existing chat's log; the REPL seeds the
-        # conversation from it.
-        chat_log="$resume"
-        echo "# Resumed: $(date '+%Y-%m-%d %H:%M:%S')" >> "$chat_log"
-      else
-        resume=""
-        stamp=$(date +%Y-%m-%d_%H%M%S)
-        safe="${model//\//_}"
-        chat_log="$chat_dir/${stamp}_${safe}.txt"
-        {
-          echo "# Chat with $friendly on :$port"
-          echo "# Model: $model"
-          echo "# Base URL: http://localhost:$port/v1"
-          echo "# Started: $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "# Thinking: $thinking_disp"
-          echo
-        } > "$chat_log"
-      fi
-      echo
-      gum style --foreground 212 --bold "Chatting with $friendly on :$port"
-      if [[ -n "$resume" ]]; then
-        echo "  (resuming an existing conversation — new messages append to its log)"
-      fi
-      echo "  Base URL:   http://localhost:$port/v1"
-      echo "  Model:      $model"
-      echo "  Commands:   /reset clears history • /exit or Ctrl-D to leave"
-      if [[ -n "$ministral_other" ]]; then
-        echo "  Thinking:   $thinking_disp • tab swaps instruct↔reasoning"
-      else
-        echo "  Thinking:   $thinking_disp • tab toggle thinking"
-      fi
-      echo
-      local -a repl_args=(
-        --url "$url"
-        --model "$model"
-        --system-prompt "$sysp"
-        --thinking "$thinking"
-        --control "$control"
-        --markers "$markers"
-        --chat-log "$chat_log"
-        --temperature "$ERR_QUICK_TEMP"
-        --max-tokens "$ERR_QUICK_MAX_TOKENS"
-        --resume "$resume"
-        --sibling "$ministral_other"
-      )
-      [[ "$is_reasoning" == "1" ]] && repl_args+=( --reasoning-first )
-      # Run the REPL under an interpreter that can rename this process to the
-      # model name (Activity Monitor / ps) via lib/sitecustomize.py. uvx makes
-      # setproctitle importable; if it isn't reachable (e.g. offline, first
-      # run) we fall back to plain python3 — same chat, same exit codes, just
-      # no rename.
-      local libprefix="$_ERR_SRC_DIR/lib${PYTHONPATH:+:$PYTHONPATH}"
-      if command -v uvx >/dev/null 2>&1 && \
-         ERR_PROCTITLE="$model" PYTHONPATH="$libprefix" \
-           uvx --from setproctitle --quiet python3 -c 'import setproctitle' >/dev/null 2>&1; then
-        ERR_PROCTITLE="$model" PYTHONPATH="$libprefix" \
-          uvx --from setproctitle --quiet python3 "$_ERR_SRC_DIR/lib/err_repl.py" "${repl_args[@]}"
-      else
-        python3 "$_ERR_SRC_DIR/lib/err_repl.py" "${repl_args[@]}"
-      fi
-      rc=$?
-      if (( rc != 3 )); then
-        return $rc
-      fi
-      # Ministral pair — tab requested the sibling variant.
-      if [[ -z "$ministral_other" ]]; then
-        return 3   # safety: shouldn't happen
-      fi
-      print -r -- "$ministral_other" > "$state_dir/ministral-default"
-      _err_ministral_swap_to "$ministral_other" "$model" "$port" || return 1
-      model="$ministral_other"
-      port="$_ERR_LAST_LAUNCH_PORT"
-      resume=""
+  # ── UI primitives ──────────────────────────────────────────────────
+  # err carries no dialog toolkit: these are what pickers and prompts need, in
+  # plain zsh. Menus are _err_pick (further down); colour is dropped when the
+  # output is not a terminal, like err.py's answers.
+  _err_style() {  # [--foreground N] [--bold] text…
+    local fg="" bold=0 text=""
+    while (( $# )); do
+      case "$1" in
+        --foreground) fg="${2:-}"; shift 2 ;;
+        --bold)       bold=1; shift ;;
+        *)            text+="${text:+ }$1"; shift ;;
+      esac
     done
+    if [[ -t 1 && -n "$text" ]]; then
+      local seq=""
+      [[ -n "$fg" ]] && seq="38;5;${fg}"
+      (( bold )) && seq="${seq:+${seq};}1"
+      print -r -- $'\e['"${seq:-0}"'m'"$text"$'\e[0m'
+    else
+      print -r -- "$text"
+    fi
   }
 
+  # y/N. 0 only on an explicit yes, and no terminal means no.
+  _err_confirm() {  # question
+    local q="${1:-Continue?}" reply=""
+    q="${q//\\n/$'\n'}"   # callers pass "question\ncontext"
+    if [[ ! -t 0 ]]; then
+      print -u2 -- "$q [y/N] (no terminal — no)"
+      return 1
+    fi
+    print -n -- "$q [y/N] " >&2
+    if read -q reply; then print >&2; return 0; fi
+    print >&2
+    return 1
+  }
+
+  # One-line prompt; Enter keeps the default, esc cancels (returns 1), ^U
+  # clears, backspace deletes. The answer goes to stdout, the prompt to stderr.
+  _err_input() {  # prompt [default]
+    local prompt="${1:-}" def="${2:-}" buf="" ch tail
+    # Test seam: answer prompts without a terminal (see tests/).
+    if [[ -n "${ERR_TEST_INPUT+set}" ]]; then
+      print -r -- "${ERR_TEST_INPUT:-$def}"
+      return 0
+    fi
+    if [[ ! -t 0 ]]; then
+      print -r -- "$def"
+      return 0
+    fi
+    print -n -- "$prompt" >&2
+    while true; do
+      read -s -k 1 ch || { print >&2; return 1 }
+      case "$ch" in
+        $'\r'|$'\n') break ;;
+        $'\e')
+          # esc cancels, but an arrow key is ESC [ A — swallow it, keep editing.
+          tail=""
+          read -s -t 0.05 -k 1 tail
+          if [[ "$tail" == ('['|'O') ]]; then
+            read -s -t 0.05 -k 1 tail
+            continue
+          fi
+          print >&2
+          return 1 ;;
+        $'\x7f'|$'\b')
+          if [[ -n "$buf" ]]; then
+            buf="${buf[1,-2]}"
+            print -n -- $'\b \b' >&2
+          fi ;;
+        $'\x15')  # ^U
+          while [[ -n "$buf" ]]; do
+            buf="${buf[1,-2]}"
+            print -n -- $'\b \b' >&2
+          done ;;
+        $'\x03')  # ^C
+          print >&2
+          return 1 ;;
+        *) buf+="$ch"; print -n -- "$ch" >&2 ;;
+      esac
+    done
+    print >&2
+    [[ -z "$buf" ]] && buf="$def"
+    print -r -- "$buf"
+  }
+
+  # Run a command under a one-line title.
   _err_apply_quick() {
     # Thinking is per-model-family and applied at launch / per request (see
-    # _err_apply_launch_thinking and lib/err_repl.py), so it is NOT written
+    # _err_apply_launch_thinking), so it is NOT written
     # into ERR_SERVER_FLAGS here — that would be a second source of truth.
     if [[ -n "$ERR_QUICK_TEMP" ]]; then
       _err_replace_or_append ERR_CHAT_FLAGS --temperature "$ERR_QUICK_TEMP"
       # mlx_vlm.server has no server-level temperature flag — temperature is a
-      # per-request field, which the chat REPL sends (and API clients send).
+      # per-request field, which err.py sends (and API clients send).
     fi
     if [[ -n "$ERR_QUICK_MAX_TOKENS" ]]; then
       _err_replace_or_append ERR_CHAT_FLAGS --max-tokens "$ERR_QUICK_MAX_TOKENS"
@@ -355,184 +218,10 @@ CFG
     fi
     # System prompts are per-request only: mlx_vlm has no --system-prompt flag
     # (server or chat), and ERR_CHAT_FLAGS is informational, so there is
-    # nothing to write here — the chat REPL injects ERR_QUICK_SYSTEM_PROMPT
+    # nothing to write here — err.py injects ERR_QUICK_SYSTEM_PROMPT
     # into the request messages and API clients pass it in the body.
   }
 
-  # Rewrite the managed block in config.zsh from current ERR_QUICK_* values.
-  # Preserves everything outside the markers; inserts at top if no block exists.
-  _err_write_managed_block() {
-    local cf="$1" tmp="$cf.tmp"
-    local has_block=0
-    grep -q '^# >>> err-managed' "$cf" && has_block=1
-    {
-      if (( ! has_block )); then
-        printf '%s\n' \
-          '# >>> err-managed quick settings — edit via "Basic settings" <<<' \
-          "ERR_QUICK_THINKING=${(qq)ERR_QUICK_THINKING}" \
-          "ERR_QUICK_TEMP=${(qq)ERR_QUICK_TEMP}" \
-          "ERR_QUICK_MAX_TOKENS=${(qq)ERR_QUICK_MAX_TOKENS}" \
-          "ERR_QUICK_SYSTEM_PROMPT=${(qq)ERR_QUICK_SYSTEM_PROMPT}" \
-          "ERR_QUICK_MOE_CACHE=${(qq)ERR_QUICK_MOE_CACHE}" \
-          '# <<< end err-managed >>>' \
-          ''
-      fi
-      local in_block=0 line
-      # `|| [[ -n "$line" ]]` keeps a final line that lacks a trailing newline
-      # (a plain `while read` would drop it and truncate the file).
-      while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" == '# >>> err-managed'* ]]; then
-          in_block=1
-          printf '%s\n' \
-            '# >>> err-managed quick settings — edit via "Basic settings" <<<' \
-            "ERR_QUICK_THINKING=${(qq)ERR_QUICK_THINKING}" \
-            "ERR_QUICK_TEMP=${(qq)ERR_QUICK_TEMP}" \
-            "ERR_QUICK_MAX_TOKENS=${(qq)ERR_QUICK_MAX_TOKENS}" \
-            "ERR_QUICK_SYSTEM_PROMPT=${(qq)ERR_QUICK_SYSTEM_PROMPT}" \
-            "ERR_QUICK_MOE_CACHE=${(qq)ERR_QUICK_MOE_CACHE}" \
-            '# <<< end err-managed >>>'
-          continue
-        fi
-        if [[ "$line" == '# <<< end err-managed'* ]]; then
-          in_block=0
-          continue
-        fi
-        (( in_block )) && continue
-        print -r -- "$line"
-      done < "$cf"
-    } > "$tmp"
-    mv "$tmp" "$cf"
-  }
-
-  _err_reload_config() {
-    source "$config_file"
-    _err_apply_quick
-  }
-
-  _err_basic_settings_menu() {
-    while true; do
-      local cur_t="${ERR_QUICK_THINKING:-default}"
-      local cur_temp="${ERR_QUICK_TEMP:-default}"
-      local cur_max="${ERR_QUICK_MAX_TOKENS:-default}"
-      local cur_sys
-      if [[ -n "$ERR_QUICK_SYSTEM_PROMPT" ]]; then
-        cur_sys="(${#ERR_QUICK_SYSTEM_PROMPT} chars)"
-      else
-        cur_sys="(none)"
-      fi
-      local cur_moe="${ERR_QUICK_MOE_CACHE:-6}"
-      local -a settings_entries=(
-        "Thinking:       $cur_t"
-        "Temperature:    $cur_temp"
-        "Max tokens:     $cur_max"
-        "MoE cache (GB): $cur_moe"
-        "System prompt:  $cur_sys"
-        "Back to Top"
-      )
-      local choice=$(printf "%s\n" "${settings_entries[@]}" | gum choose --header $'\nBasic settings (current values shown):  esc = back' --height 14)
-      [[ -z "$choice" || "$choice" == "Back to Top" ]] && return
-      case "$choice" in
-        "Thinking:"*)
-          local pick=$(printf "default\noff\non" | gum choose --header "Thinking? (default and off both mean off; on shows the reasoning trace)")
-          [[ -n "$pick" ]] && ERR_QUICK_THINKING="$pick"
-          ;;
-        "Temperature:"*)
-          local pick=$(printf "default\n0.0\n0.3\n0.7\n1.0\nCustom…" | gum choose --header "Temperature")
-          case "$pick" in
-            default) ERR_QUICK_TEMP="" ;;
-            "Custom…") ERR_QUICK_TEMP=$(gum input --placeholder "e.g. 0.5" --value "$ERR_QUICK_TEMP") ;;
-            "") ;;
-            *) ERR_QUICK_TEMP="$pick" ;;
-          esac
-          ;;
-        "Max tokens:"*)
-          local pick=$(printf "default\n512\n2048\n8192\n32768\nCustom…" | gum choose --header "Max tokens")
-          case "$pick" in
-            default) ERR_QUICK_MAX_TOKENS="" ;;
-            "Custom…") ERR_QUICK_MAX_TOKENS=$(gum input --placeholder "e.g. 4096" --value "$ERR_QUICK_MAX_TOKENS") ;;
-            "") ;;
-            *) ERR_QUICK_MAX_TOKENS="$pick" ;;
-          esac
-          ;;
-        "MoE cache (GB):"*)
-          local pick=$(printf "default\n4\n6\n8\n12\n16\nCustom…" | gum choose --header "Streaming MoE expert cache (GiB)")
-          case "$pick" in
-            default) ERR_QUICK_MOE_CACHE="" ;;
-            "Custom…") ERR_QUICK_MOE_CACHE=$(gum input --placeholder "e.g. 10" --value "$ERR_QUICK_MOE_CACHE") ;;
-            "") ;;
-            *) ERR_QUICK_MOE_CACHE="$pick" ;;
-          esac
-          ;;
-        "System prompt:"*)
-          local sub=$(printf "Edit\nClear\nCancel" | gum choose --header "System prompt")
-          case "$sub" in
-            Edit)
-              local new
-              new=$(gum write --placeholder "Type system prompt — Ctrl-D to save, Esc to cancel" --value "$ERR_QUICK_SYSTEM_PROMPT" --width 80 --height 12)
-              [[ $? -eq 0 && -n "$new" ]] && ERR_QUICK_SYSTEM_PROMPT="$new"
-              ;;
-            Clear) ERR_QUICK_SYSTEM_PROMPT="" ;;
-          esac
-          ;;
-      esac
-      _err_write_managed_block "$config_file"
-      _err_reload_config
-    done
-  }
-
-  _err_advanced_settings_menu() {
-    local ed=$(_err_pick_editor)
-    eval "$ed \"\$config_file\""
-    _err_reload_config
-  }
-
-  _err_open_chat_folder() {
-    open "$chat_dir"
-  }
-
-  # Swap a running Ministral half for its sibling: stop only that half (leaving
-  # any other parallel model alone), wait for its port, then relaunch there.
-  # Returns 0 if the new server came up.
-  _err_ministral_swap_to() {
-    local new="$1" old_model="$2" old_port="$3"
-    local pid port model
-    while IFS=$'\t' read -r pid port model; do
-      [[ -n "$pid" && "$model" == "$old_model" ]] && { kill "$pid" 2>/dev/null; _err_drop "$pid"; }
-    done < <(_err_running)
-    local i
-    for i in {1..40}; do
-      _err_port_free "$old_port" && break
-      sleep 0.2
-    done
-    _err_launch "$new" "$old_port"
-  }
-
-  _err_main_restart() {
-    _err_main_clear
-    local -a running_models=()
-    local pid port model
-    while IFS=$'\t' read -r pid port model; do
-      [[ -n "$model" ]] && running_models+=( "$model" )
-    done < <(_err_running)
-    if (( ${#running_models} )); then
-      _err_stop_all >/dev/null 2>&1
-      local i
-      for i in {1..40}; do
-        _err_port_free 11500 && break
-        sleep 0.2
-      done
-      for model in "${running_models[@]}"; do
-        echo "Restarting: $model"
-        _err_launch "$model"
-      done
-    else
-      echo "No model is running — nothing to restart."
-      echo "(Menu refreshed.)"
-    fi
-  }
-
-  [[ -f "$config_file" ]] || _err_write_default_config "$config_file"
-  _err_reload_config
 
   # Self-heal the APC sitecustomize in the mlx-vlm uv tool env: a
   # `uv tool update` reinstalls the env and drops it. With it in place, every
@@ -560,17 +249,18 @@ _err_hf_setup() {
   local action tok tf
   tf=$(_err_hf_token_file)
   echo
-  gum style --foreground 212 --bold "HuggingFace authentication"
-  gum style --foreground 250 "err downloads models from the HuggingFace Hub. Adding a token gets you"
-  gum style --foreground 250 "higher rate limits + faster downloads and unlocks gated/private models."
-  gum style --foreground 244 "(Without one, err just warns and still works for public models.)"
+  _err_style --foreground 212 --bold "HuggingFace authentication"
+  _err_style --foreground 250 "err downloads models from the HuggingFace Hub. Adding a token gets you"
+  _err_style --foreground 250 "higher rate limits + faster downloads and unlocks gated/private models."
+  _err_style --foreground 244 "(Without one, err just warns and still works for public models.)"
   echo
-  action=$(printf "Paste a token now\nSkip (public models only)" | gum choose --header "Hugging Face token?" --height 5)
+  local action
+  action=$(_err_pick --header 'Hugging Face token?' "Paste a token now" "Skip (public models only)")
   if [[ -z "$action" || "$action" != "Paste"* ]]; then
     echo "Skipped — public model downloads will simply be unauthenticated."
     return 1
   fi
-  tok=$(gum input --prompt "Token: " --placeholder "hf_...  (create one at https://huggingface.co/settings/tokens)")
+  tok=$(_err_input 'Token (hf_..., https://huggingface.co/settings/tokens): ')
   tok="${tok//[[:space:]]/}"
   if [[ -z "$tok" ]]; then
     echo "No token entered — skipped."
@@ -600,6 +290,27 @@ fi
 # weird download if, like err, you want each cache entry to be self-contained.
 # Disable it so huggingface_hub stores those blobs as regular files under the model dir.
 export HF_HUB_DISABLE_SHARED_BLOBS=1
+
+  # Every server err starts is detached (`&!` / nohup) and would otherwise
+  # outlive the command that started it and hold its weights in RAM forever.
+  # Arm err.py's idle watchdog for it: inactivity is measured from the port's
+  # heartbeat, live connections and the server's own CPU time, so this works
+  # for clients err knows nothing about (curl, pi, another app).
+  #
+  # The watchdog gets the pid that LISTENS on the port, not `$!`: `$!` is the
+  # uv/mlx-vlm shim, and SIGTERM to the shim leaves the real server (and its
+  # RAM) behind. Do not arm this from a read-only query path — `err info`
+  # is polled by clients and would keep every model awake.
+  _err_arm_watchdog() {
+    local port="$1" launched="$2" pid
+    [[ -n "$port" ]] || return 0
+    : > "$state_dir/mlx_heartbeat-$port" 2>/dev/null
+    pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+    [[ -n "$pid" ]] || pid="$launched"
+    [[ -n "$pid" ]] || return 0
+    python3 "$_ERR_SRC_DIR/err.py" --watchdog "$pid" "$port" >/dev/null 2>&1 &!
+    return 0
+  }
 
   # Discover running mlx_vlm.server instances on err's ports (11500-11509) by
   # asking the OS, not a state file. Emits one TSV line per server:
@@ -638,1351 +349,12 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
 
   _err_stop_all() {
     local pid port model
-    _ERR_BYE_STOPPED=0
     while IFS=$'\t' read -r pid port model; do
       if [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; then
         echo "Stopped: $model (:$port)"
-        (( _ERR_BYE_STOPPED++ ))
       fi
     done < <(_err_running)
     _ERR_SESSION_PIDS=()
-  }
-
-  _err_launch() {
-    local model="$1" forced_port="${2:-}"
-    local unsupported
-    if unsupported=$(_err_model_unsupported_reason "$model" "$hub_dir"); then
-      echo "err: $model can't be served — $unsupported."
-      echo "MLX-quantized repos run directly (e.g. mlx-community/…-4bit)."
-      return 1
-    fi
-    local port
-    if [[ -n "$forced_port" ]]; then
-      port="$forced_port"
-    else
-      port=$(_err_find_port)
-    fi
-    if [[ -z "$port" ]]; then
-      echo "All ports :11500–:11509 are busy. Stop a running model (^s in the menu) first."
-      return 1
-    fi
-    _ERR_LAST_LAUNCH_PORT="$port"
-    local safe="${model//\//_}"
-    local log="$log_dir/${safe}-${port}.log"
-    local -a launch_flags=( "${ERR_SERVER_FLAGS[@]}" )
-    _err_apply_launch_thinking launch_flags "$model" "$hub_dir"
-    # Prefix caching: without this the server re-prefills the whole
-    # conversation every turn (mlx-vlm leaves APC off by default).
-    _err_export_apc_env "$state_dir"
-    # Bound the on-disk prefix cache in TOTAL before a server writes more into
-    # it; mlx-vlm's own cap is per model directory, so it never bounds the sum.
-    _err_apc_sweep "$state_dir/apc"
-    # ERR_PROCTITLE + PYTHONPATH make the server rename itself to the model
-    # name in Activity Monitor / ps (see lib/sitecustomize.py), and let a
-    # compatible MoE load lib/err_moe from this checkout.
-    _err_build_server_argv "$model" "$port" "$hub_dir" "${launch_flags[@]}"
-    ERR_PROCTITLE="$model" PYTHONPATH="$_ERR_SRC_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" \
-      "${reply[@]}" >"$log" 2>&1 &
-    local pid=$!
-    _ERR_SESSION_PIDS+=( "$pid" )
-    local rc=0
-    gum spin --spinner dot --title "Initializing $model… (Ctrl-C to cancel)" -- zsh -c "
-      local n=0
-      while kill -0 $pid 2>/dev/null; do
-        (( n++ > 2400 )) && exit 1
-        [[ -s '$log' ]] && exit 0
-        sleep 0.3
-      done
-      exit 1
-    "
-    rc=$?
-    if (( rc == 0 )); then
-      echo "  ✓ Initialized"
-      gum spin --spinner dot --title "Loading model weights…" -- zsh -c "
-        local n=0
-        while kill -0 $pid 2>/dev/null; do
-          (( n++ > 2400 )) && exit 1
-          curl -fs -o /dev/null --max-time 1 http://127.0.0.1:$port/v1/models && exit 0
-          grep -qE 'Starting|Uvicorn|running|listening|Application startup' '$log' 2>/dev/null && exit 0
-          sleep 0.5
-        done
-        exit 1
-      "
-      rc=$?
-    fi
-    if (( rc == 0 )); then
-      echo "  ✓ Weights loaded"
-      gum spin --spinner dot --title "Warming up server on :$port…" -- zsh -c "
-        local n=0
-        while kill -0 $pid 2>/dev/null; do
-          (( n++ > 2400 )) && exit 1
-          curl -fs -o /dev/null --max-time 1 http://127.0.0.1:$port/v1/models && exit 0
-          sleep 0.5
-        done
-        exit 1
-      "
-      rc=$?
-      (( rc == 0 )) && echo "  ✓ Server ready"
-    fi
-    if (( rc == 0 )); then
-      echo "Started: $model on :$port (pid $pid)"
-      echo "Logs: $log"
-      echo
-      _err_talk_info "$model" "$port"
-    elif kill -0 "$pid" 2>/dev/null; then
-      if gum confirm "Loading cancelled. Kill $model (pid $pid)?"; then
-        kill "$pid" 2>/dev/null
-        _err_drop "$pid"
-        echo "Killed: $model"
-      else
-        echo "Still loading in background on :$port (pid $pid). Logs: $log"
-      fi
-    else
-      _err_drop "$pid"
-      echo "Failed to start $model. Last log lines:"
-      tail -n 20 "$log"
-    fi
-    return $rc
-  }
-
-  # Download one catalog/custom entry (space- or '&'-separated ids download
-  # together, e.g. a Ministral pair), then offer to start the first one. Shared
-  # by the Download screen and the main menu's inline curated rows.
-  _err_download_flow() {
-    local sub="$1" title="$2" model="" ok=1
-    local -a dl=( ${(s: & :)sub} )
-    if ! _err_hf_has_token && (( _ERR_HF_SKIPPED == 0 )); then
-      if ! _err_hf_setup; then
-        _ERR_HF_SKIPPED=1
-      fi
-    fi
-    echo
-    gum style --foreground 212 --bold "Downloading $title"
-    echo "(progress will stream below — Ctrl-C to abort)"
-    echo
-    for model in "${dl[@]}"; do
-      echo "  ▶ $model"
-      # Id-only check (no hub dir): a half-cached snapshot must still be
-      # re-downloadable, while a GGUF id is nonsensical to fetch here.
-      if _err_model_unsupported_reason "$model" >/dev/null; then
-        echo "    GGUF is not loadable by mlx-vlm — pick an MLX-quantized repo."
-        ok=0
-        continue
-      fi
-      if ! _err_snapshot_download "$model"; then
-        ok=0
-      fi
-    done
-    if (( ok )); then
-      echo
-      gum style --foreground 42 "✓ Downloaded: $title"
-      echo
-      if gum confirm "Start ${dl[1]} now?"; then
-        _err_launch "${dl[1]}"
-      fi
-    else
-      echo
-      gum style --foreground 196 "✗ Download failed or cancelled."
-    fi
-    _err_pause
-  }
-
-  _err_download_menu() {
-    local ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
-
-    typeset -A installed
-    local models m
-    models=$(ls "$hub_dir" 2>/dev/null | grep '^models--' | sed 's/models--//' | sed 's/--/\//g')
-    for m in ${(f)models}; do installed[$m]=1; done
-
-    # ---- Catalog rows for every tier this Mac can host: its own tier plus all
-    # lower ones, so a bigger machine still sees the smaller models. The parser
-    # turns each 2-line block (id + tagline) into a title (the id's basename)
-    # plus a description, and strips any leading '#' so entries commented out in
-    # the source still show. Fully installed entries are skipped.
-    local -a p_title=() p_sub=() p_tags=() p_desc=()
-    local c_tier _c_tname c_title c_ids c_tags c_desc
-    while IFS=$'\x1f' read -r c_tier _c_tname c_title c_ids c_tags c_desc; do
-      local -a dl=( ${(s: & :)c_ids} ) m
-      local allinst=1
-      for m in "${dl[@]}"; do
-        [[ -n "${installed[$m]}" ]] || { allinst=0; break; }
-      done
-      (( allinst )) && continue
-      p_title+=( "$c_title" ); p_sub+=( "$c_ids" ); p_tags+=( "$c_tags" )
-      p_desc+=( "$c_desc" )
-    done < <(_err_catalog_rows_for_ram "$ram_gb" "$curated_file")
-
-    # Deduplicate by the model/sub line, keeping the first occurrence.
-    typeset -A seen
-    local -a srcs=() tags=() descs=() titles=()
-    local i s
-    for (( i=1; i<=${#p_sub[@]}; i++ )); do
-      s="${p_sub[$i]}"
-      [[ -n "${seen[$s]}" ]] && continue
-      seen[$s]=1
-      titles+=( "${p_title[$i]}" )
-      srcs+=( "$s" ); tags+=( "${p_tags[$i]}" ); descs+=( "${p_desc[$i]}" )
-    done
-
-    # ---- Build flat rows for the menu. Cursor/nav only lands on rows with
-    # RCUR=1; RDIM records rows that render dimmed when not under the cursor.
-    local dim_on=$'\e[2m' dim_off=$'\e[0m'
-    local title tline max_w=0
-    for (( i=1; i<=${#srcs[@]}; i++ )); do
-      title="${titles[$i]}"
-      [[ -n "$title" ]] || title="${srcs[$i]##*/}"
-      (( ${#title} > max_w )) && max_w=${#title}
-    done
-    (( max_w < 12 )) && max_w=12
-    local -a ROWS=() RCUR=() RSRC=() RTITLE=() RDIM=()
-    for (( i=1; i<=${#srcs[@]}; i++ )); do
-      # Primary row: the entry title (the model id's basename), plus a legacy
-      # '// tags' column when the source still carries tags.
-      title="${titles[$i]}"
-      [[ -n "$title" ]] || title="${srcs[$i]##*/}"
-      if [[ -n "${tags[$i]}" ]]; then
-        tline=$(printf '  %-*s  // %s' "$max_w" "$title" "${tags[$i]}")
-      else
-        tline="  $title"
-      fi
-      ROWS+=( "$tline" ); RCUR+=( 1 ); RSRC+=( "${srcs[$i]}" ); RTITLE+=( "$title" ); RDIM+=( 0 )
-      if [[ -n "${descs[$i]}" ]]; then
-        ROWS+=( "    ${descs[$i]}" ); RCUR+=( 0 ); RSRC+=( "" ); RTITLE+=( "" ); RDIM+=( 1 )
-      fi
-    done
-
-    if (( ${#srcs[@]} == 0 )); then
-      ROWS+=( "  No more hand picked models available" ); RCUR+=( 0 ); RSRC+=( "" ); RTITLE+=( "" ); RDIM+=( 1 )
-    fi
-    ROWS+=( "  ──────────────────────────────────────────" ); RCUR+=( 0 ); RSRC+=( "" ); RTITLE+=( "" ); RDIM+=( 1 )
-    ROWS+=( "  Custom (paste HuggingFace ID)…" ); RCUR+=( 1 ); RSRC+=( "__custom__" ); RTITLE+=( "" ); RDIM+=( 0 )
-    ROWS+=( "  Open models folder" ); RCUR+=( 1 ); RSRC+=( "__openhub__" ); RTITLE+=( "" ); RDIM+=( 0 )
-    ROWS+=( "  Back to Top" ); RCUR+=( 1 ); RSRC+=( "__back__" ); RTITLE+=( "" ); RDIM+=( 0 )
-
-    # If any "t3" shorthand is shown, explain it on the bottom line.
-    local has_t3=0
-    for (( i=1; i<=${#tags[@]}; i++ )); do
-      [[ "${tags[$i]}" == *t3* ]] && { has_t3=1; break; }
-    done
-
-    # ---- Terminal/state locals for the key-driven menu.
-    local term_lines=${LINES:-24}
-    (( term_lines < 8 )) && term_lines=24
-    local vis=$(( term_lines - 7 ))
-    (( vis < 1 )) && vis=1
-    local width=${COLUMNS:-80}
-    (( width < 40 )) && width=80
-    local cursor=0 scroll=0 drawn=0 nlines=0 quit=0
-    local up1=$'\e'[A up2=$'\e'OA down1=$'\e'[B down2=$'\e'OB
-    local footer="↑/↓ nav • enter select • esc back"
-    if (( has_t3 )); then
-      footer="$footer  •  t3 = text, tools, thinking"
-    fi
-
-    local k
-    for (( k=1; k<=${#RCUR[@]}; k++ )); do
-      (( RCUR[$k] )) && { cursor=$(( k - 1 )); break; }
-    done
-
-    _D_scroll_cursor() {
-      local n=${#ROWS[@]} max=$(( n - vis ))
-      (( max < 0 )) && max=0
-      (( scroll > max )) && scroll=$max
-      if (( cursor < scroll )); then
-        scroll=$cursor
-      elif (( cursor >= scroll + vis )); then
-        scroll=$(( cursor - vis + 1 ))
-      fi
-      (( scroll < 0 )) && scroll=0
-    }
-    _D_render() {
-      # Hide the terminal cursor while the list is painted (it would otherwise
-      # blink on the blank line under the footer); _D_clear shows it again.
-      print -n -- $'\e[?25l'
-      if (( drawn )); then
-        print -n -- "\033[${nlines}A\033[J"
-      fi
-      local -a out=()
-      out+=( $'\e[1;35mDownload new model:\e[0m' )
-      local n=${#ROWS[@]} end=$(( scroll + vis )) j line
-      (( end > n )) && end=n
-      for (( j=scroll; j<end; j++ )); do
-        line="${ROWS[$((j+1))]}"
-        if (( j == cursor )); then
-          out+=( $'\e[1;36m>'"${line:1}"$'\e[0m' )
-        elif (( RDIM[$((j+1))] )); then
-          out+=( "${dim_on}${line}${dim_off}" )
-        else
-          out+=( "$line" )
-        fi
-      done
-      out+=( $'\e[2m'"${footer:0:$(( width - 1 ))}"$'\e[0m' )
-      nlines=0
-      for line in "${out[@]}"; do
-        print -n -- "$line\033[K\n"
-        (( nlines++ ))
-      done
-      drawn=1
-    }
-    _D_clear() {
-      if (( drawn )); then
-        print -n -- "\033[${nlines}A\033[J"
-        drawn=0
-      fi
-      print -n -- $'\e[?25h'
-    }
-    _D_move() {
-      local delta="$1" n=${#ROWS[@]} new=$cursor guard=$cursor
-      while true; do
-        new=$(( new + delta ))
-        (( new < 0 )) && new=$(( n - 1 ))
-        (( new >= n )) && new=0
-        if (( RCUR[$((new+1))] )); then
-          cursor=$new
-          break
-        fi
-        (( new == guard )) && break
-      done
-      _D_scroll_cursor
-    }
-    _D_do_download() { _err_download_flow "$1" "$2" }
-    _D_activate() {
-      local r=$(( cursor + 1 ))
-      (( RCUR[$r] )) || return
-      _D_clear
-      local src="${RSRC[$r]}" model=""
-      if [[ "$src" == "__custom__" ]]; then
-        model=$(gum input --placeholder "e.g. mlx-community/Ministral-3-3B-Instruct-2512-4bit" --prompt "Model: ")
-        [[ -n "$model" ]] && { _D_do_download "$model" "$model"; quit=1; }
-      elif [[ "$src" == "__back__" ]]; then
-        quit=1
-      elif [[ "$src" == "__openhub__" ]]; then
-        _D_clear
-        open "$hub_dir"
-      else
-        _D_do_download "$src" "${RTITLE[$r]}"
-        quit=1
-      fi
-    }
-
-    stty -ixon 2>/dev/null
-    _D_render
-    while true; do
-      _err_main_read_key
-      local key="$_ERR_MENU_KEY"
-      if [[ -z "$key" ]]; then
-        _D_clear
-        return
-      fi
-      if [[ "$key" == "$up1" || "$key" == "$up2" ]]; then
-        _D_move -1; _D_render
-      elif [[ "$key" == "$down1" || "$key" == "$down2" ]]; then
-        _D_move 1; _D_render
-      elif [[ "$key" == $'\n' || "$key" == $'\r' ]]; then
-        _D_activate
-        if (( quit )); then
-          _D_clear
-          return
-        fi
-        _D_render
-      elif [[ "$key" == $'\x11' || "$key" == $'\e' ]]; then
-        _D_clear
-        return
-      fi
-    done
-  }
-
-  _err_chat_history_menu() {
-    # Key-driven menu mirroring the main menu. enter = per-chat actions,
-    # ^d deletes the highlighted chat, s = search, o = open chat folder,
-    # esc/^q = back to main menu.
-    local -a _H_LINES=() _H_FILES=()
-    local _H_CURSOR=0 _H_SCROLL=0 _H_DRAWN=0 _H_NLINES=0 _H_VIS _H_WIDTH
-    local _H_QUIT=0
-    local _up1=$'\e'[A _up2=$'\e'OA _down1=$'\e'[B _down2=$'\e'OB
-    local _term_lines=${LINES:-24}
-    (( _term_lines < 8 )) && _term_lines=24
-    _H_VIS=$(( _term_lines - 7 ))
-    (( _H_VIS < 1 )) && _H_VIS=1
-    _H_WIDTH=${COLUMNS:-80}
-    (( _H_WIDTH < 40 )) && _H_WIDTH=80
-
-    _H_name_of() {
-      local f="$1" n
-      n=$(sed -n 's/^# Name: //p' "$f" | head -n1)
-      [[ -z "$n" ]] && n=$(sed -n 's/^# Chat with //p' "$f" | head -n1 | sed 's/ on :[0-9]*$//')
-      [[ -z "$n" ]] && n="${f:t:r}"
-      print -r -- "$n"
-    }
-
-    _H_build() {
-      local f friendly started msgs kbytes
-      local -a chat_files=( "$chat_dir"/*.txt(N) )
-      local -a sorted_files=( ${(On)chat_files} )
-      _H_LINES=(); _H_FILES=()
-      for f in "${sorted_files[@]}"; do
-        friendly=$(_H_name_of "$f")
-        started=$(sed -n 's/^# Started: //p' "$f" | head -n1)
-        [[ -z "$started" ]] && started="${f:t:r}"
-        msgs=$(grep -cE '^(you|assistant)> ' "$f")
-        kbytes=$(awk '{s+=length($0)+1} END{printf "%.0f", s/1024}' "$f")
-        (( kbytes < 1 )) && kbytes=1
-        _H_LINES+=("$friendly  —  $started  · $msgs msgs · ${kbytes}KB")
-        _H_FILES+=("$f")
-      done
-      if (( ${#_H_LINES[@]} == 0 )); then
-        _H_LINES+=("No chats yet.")
-      fi
-      _H_LINES+=("──────────────" "Clear history")
-      _H_LINES+=("Open chat folder" "Back to Top")
-      (( _H_CURSOR >= ${#_H_LINES[@]} )) && _H_CURSOR=$(( ${#_H_LINES[@]} - 1 ))
-      (( _H_CURSOR < 0 )) && _H_CURSOR=0
-      _H_scroll_cursor
-    }
-
-    _H_scroll_cursor() {
-      local n=${#_H_LINES[@]} max=$(( n - _H_VIS ))
-      (( max < 0 )) && max=0
-      (( _H_SCROLL > max )) && _H_SCROLL=$max
-      if (( _H_CURSOR < _H_SCROLL )); then
-        _H_SCROLL=$_H_CURSOR
-      elif (( _H_CURSOR >= _H_SCROLL + _H_VIS )); then
-        _H_SCROLL=$(( _H_CURSOR - _H_VIS + 1 ))
-      fi
-      (( _H_SCROLL < 0 )) && _H_SCROLL=0
-    }
-
-    _H_render() {
-      # Hide the terminal cursor while the list is painted; _H_clear shows it.
-      print -n -- $'\e[?25l'
-      if (( _H_DRAWN )); then
-        print -n -- "\033[${_H_NLINES}A\033[J"
-      fi
-      local -a out=()
-      out+=( $'\e[1;35mChat History:\e[0m  (enter actions • esc back)' )
-      local n=${#_H_LINES[@]} end=$(( _H_SCROLL + _H_VIS ))
-      (( end > n )) && end=n
-      local i idx line prefix sep
-      for (( i=_H_SCROLL; i<end; i++ )); do
-        idx=$i
-        line="${_H_LINES[$((idx+1))]}"
-        sep=0
-        [[ "$line" == "──────────────" ]] && sep=1
-        prefix="  "
-        (( idx == _H_CURSOR )) && prefix="> "
-        if (( sep )); then
-          out+=( $'\e[2m'"$line"$'\e[0m' )
-        elif (( idx == _H_CURSOR )); then
-          out+=( $'\e[1;36m'"$prefix$line"$'\e[0m' )
-        else
-          out+=( "$prefix$line" )
-        fi
-      done
-      local foot="↑/↓ nav • enter actions • ^d delete • s search • o chat folder • esc back"
-      out+=( $'\e[2m'"${foot:0:$(( _H_WIDTH - 1 ))}"$'\e[0m' )
-      _H_NLINES=0
-      for line in "${out[@]}"; do
-        print -n -- "$line\033[K\n"
-        (( _H_NLINES++ ))
-      done
-      _H_DRAWN=1
-    }
-
-    _H_clear() {
-      if (( _H_DRAWN )); then
-        print -n -- "\033[${_H_NLINES}A\033[J"
-        _H_DRAWN=0
-      fi
-      print -n -- $'\e[?25h'
-    }
-
-    _H_move() {
-      local delta="$1" n=${#_H_LINES[@]} new=$_H_CURSOR guard=$_H_CURSOR
-      while true; do
-        new=$(( new + delta ))
-        (( new < 0 )) && new=$(( n - 1 ))
-        (( new >= n )) && new=0
-        if [[ "${_H_LINES[$((new+1))]}" != "──────────────" ]]; then
-          _H_CURSOR=$new
-          break
-        fi
-        (( new == guard )) && break
-      done
-      _H_scroll_cursor
-    }
-
-    _H_delete() {
-      local idx=$(( _H_CURSOR + 1 ))
-      local file="${_H_FILES[$idx]}"
-      [[ -n "$file" && -f "$file" ]] || return
-      _H_clear
-      if gum confirm "Delete this chat?\n${_H_LINES[$idx]}"; then
-        rm -f -- "$file"
-        echo "Deleted."
-      else
-        echo
-      fi
-      _err_pause
-      _H_build; _H_render
-    }
-
-    _H_export() {
-      local file="$1" mode="${2:-}"
-      local md
-      md=$( {
-        echo "# Chat: $(_H_name_of "$file")"
-        echo
-        sed -E '/^#[[:space:]]/d; /^\(history cleared\)/d' "$file" \
-          | sed -E 's/^you> /**You:** /; s/^assistant> /**Assistant:** /'
-      } )
-      if [[ "$mode" == "copy" ]]; then
-        _H_clear
-        if printf '%s' "$md" | pbcopy 2>/dev/null; then
-          echo "Copied chat to clipboard (Markdown)."
-        else
-          echo "Clipboard copy failed (pbcopy unavailable)."
-        fi
-        _err_pause
-        _H_render
-        return
-      fi
-      local out="$chat_dir/${file:t:r}.md"
-      _H_clear
-      printf '%s\n' "$md" > "$out"
-      echo "Exported to: $out"
-      if gum confirm "Open the exported file?"; then
-        open "$out" 2>/dev/null
-      fi
-      _err_pause
-      _H_render
-    }
-
-    _H_rename() {
-      local file="$1" cur new
-      cur=$(_H_name_of "$file")
-      _H_clear
-      new=$(gum input --placeholder "New name for this chat" --value "$cur")
-      if [[ -n "$new" ]]; then
-        python3 - "$file" "$new" <<'PY'
-import sys
-f, nn = sys.argv[1], sys.argv[2]
-lines = open(f).read().splitlines()
-out, done = [], False
-for ln in lines:
-    if ln.startswith("# Name: "):
-        out.append("# Name: " + nn); done = True; continue
-    if not done and ln.startswith("# Chat with "):
-        out.append("# Name: " + nn); done = True
-    out.append(ln)
-if not done:
-    out.insert(0, "# Name: " + nn)
-open(f, "w").write("\n".join(out) + "\n")
-PY
-        echo "Renamed chat."
-      fi
-      _err_pause
-    }
-
-    _H_resume() {
-      local idx=$(( _H_CURSOR + 1 ))
-      local file="${_H_FILES[$idx]}"
-      [[ -n "$file" && -f "$file" ]] || return
-      local model=$(sed -n 's/^# Model: //p' "$file" | head -n1)
-      if [[ -z "$model" ]]; then
-        _H_clear
-        gum style --foreground 196 "Can't determine the model for this chat (missing '# Model:' header)."
-        _err_pause
-        _H_render
-        return
-      fi
-      local port="" pid _p _pt _m
-      while IFS=$'\t' read -r _p _pt _m; do
-        [[ "$_m" == "$model" ]] && { port="$_pt"; break; }
-      done < <(_err_running)
-      _H_clear
-      if [[ -z "$port" ]]; then
-        gum style --foreground 212 --bold "Continuing chat: $(_err_display_name "$model")"
-        echo "The model isn't running — starting it first, then resuming the conversation."
-        if ! _err_launch "$model"; then
-          _err_pause
-          _H_render
-          return
-        fi
-        port="$_ERR_LAST_LAUNCH_PORT"
-      fi
-      _err_chat_repl "$model" "$port" "$file"
-      _H_render
-    }
-
-    _H_search() {
-      _H_clear
-      local q=$(gum input --placeholder "Search chats (case-insensitive, regex ok)…")
-      if [[ -z "$q" ]]; then
-        _H_render
-        return
-      fi
-      local -a results=() rfiles=() rlines=()
-      local f friendly ln ctx hit
-      for f in "$chat_dir"/*.txt(N); do
-        friendly=$(_H_name_of "$f")
-        while IFS= read -r hit; do
-          ln="${hit%%:*}"
-          ctx="${hit#*:}"
-          results+=("$friendly  @$ln  —  $ctx")
-          rfiles+=("$f"); rlines+=("$ln")
-        done < <(grep -n -i -E -- "$q" "$f" 2>/dev/null)
-      done
-      if (( ${#results[@]} == 0 )); then
-        echo "No matches for: $q"
-        _err_pause
-        _H_render
-        return
-      fi
-      local pick=$(printf "%s\n" "${results[@]}" | gum choose --header "Search results for: $q" --height 16)
-      if [[ -n "$pick" ]]; then
-        local j
-        for (( j=1; j<=${#results[@]}; j++ )); do
-          [[ "${results[$j]}" == "$pick" ]] && { gum pager < "${rfiles[$j]}"; break; }
-        done
-      fi
-      _H_render
-    }
-
-    _H_activate() {
-      local idx=$(( _H_CURSOR + 1 ))
-      local line="${_H_LINES[$idx]}" file="${_H_FILES[$idx]}"
-      if [[ "$line" == "Clear history" ]]; then
-        _H_clear
-        if gum confirm "Delete all chat history?"; then
-          rm -f "$chat_dir"/*.txt(N)
-          echo "Chat history cleared."
-        else
-          echo
-        fi
-        _err_pause
-        _H_build; _H_render
-        return
-      fi
-      if [[ "$line" == "Back to Top" ]]; then
-        _H_clear
-        _H_QUIT=1
-        return
-      fi
-      if [[ "$line" == "Open chat folder" ]]; then
-        _H_clear; _err_open_chat_folder; _H_render
-        return
-      fi
-      if [[ "$line" == "No chats yet." ]]; then
-        return
-      fi
-      [[ -n "$file" && -f "$file" ]] || return
-      local act=$(printf "View\nResume this chat\nCopy to clipboard\nRename\nDelete permanently\nCancel" | gum choose --header "$(_H_name_of "$file")" --height 10)
-      [[ -z "$act" || "$act" == "Cancel" ]] && { _H_render; return; }
-      case "$act" in
-        "View") _H_clear; gum pager < "$file"; _H_render ;;
-        "Resume this chat") _H_resume ;;
-        "Copy to clipboard") _H_export "$file" copy ;;
-        "Rename") _H_rename "$file"; _H_build; _H_render ;;
-        "Delete permanently")
-          _H_clear
-          if gum confirm "Permanently delete this chat? (no undo)"; then
-            rm -f -- "$file"; echo "Deleted permanently."
-          else
-            echo
-          fi
-          _err_pause
-          _H_build; _H_render
-          ;;
-      esac
-    }
-
-    stty -ixon 2>/dev/null
-    _H_build
-    _H_render
-    while true; do
-      _err_main_read_key
-      local key="$_ERR_MENU_KEY"
-      if [[ "$key" == "$_up1" || "$key" == "$_up2" ]]; then
-        _H_move -1; _H_render
-      elif [[ "$key" == "$_down1" || "$key" == "$_down2" ]]; then
-        _H_move 1; _H_render
-      elif [[ "$key" == $'\n' || "$key" == $'\r' ]]; then
-        _H_activate
-        if (( _H_QUIT )); then
-          _H_clear
-          return
-        fi
-      elif [[ "$key" == $'\x04' ]]; then
-        _H_delete
-      elif [[ "$key" == "s" || "$key" == "S" || "$key" == "/" ]]; then
-        _H_search
-      elif [[ "$key" == "o" || "$key" == "O" ]]; then
-        _H_clear; _err_open_chat_folder; _H_render
-      elif [[ "$key" == $'\x11' || "$key" == $'\e' || -z "$key" ]]; then
-        _H_clear
-        return
-      fi
-    done
-  }
-  _err_main_build() {
-    local pid port model models m rport think_suffix display first_running_idx=-1 sibfull
-    local ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
-    _ERR_MENU_LINES=()
-    _ERR_MENU_KINDS=()
-    _ERR_MENU_MODELS=()
-    _ERR_MENU_PORTS=()
-    _ERR_MENU_ACTIONS=()
-    _ERR_MENU_PAIRS=()
-    typeset -A running_for_model
-    while IFS=$'\t' read -r pid port model; do
-      [[ -z "$pid" ]] && continue
-      running_for_model[$model]="$pid"$'\t'"$port"
-    done < <(_err_running)
-
-    # Append one row (keeps the six parallel arrays in step). Kinds:
-    #   model    - an installed model, enter runs/chats
-    #   download - a curated suggestion, enter downloads it
-    #   action   - a menu action (ACTIONS holds its name)
-    #   header   - a section label; not navigable
-    #   note     - dim informational text; not navigable
-    #   separator- a rule; not navigable
-    _row() {
-      _ERR_MENU_LINES+=( "$1" )
-      _ERR_MENU_KINDS+=( "$2" )
-      _ERR_MENU_MODELS+=( "${3:-}" )
-      _ERR_MENU_PORTS+=( "${4:-}" )
-      _ERR_MENU_ACTIONS+=( "${5:-}" )
-      _ERR_MENU_PAIRS+=( "${6:-}" )
-    }
-
-    _ERR_MENU_NO_MODELS=0
-    models=$(ls "$hub_dir" 2>/dev/null | grep '^models--' | sed 's/models--//' | sed 's/--/\//g')
-    # Drop repos mlx-vlm cannot load (GGUF): they would only fail at launch.
-    # Filtering on capability rather than on an "mlx" in the id keeps locally
-    # converted models, whose names need not mention mlx, in the list.
-    if [[ -n "$models" ]]; then
-      local -a supported=() dl_model
-      for dl_model in ${(f)models}; do
-        _err_model_supported "$dl_model" "$hub_dir" && supported+=( "$dl_model" )
-      done
-      models="${(F)supported}"
-    fi
-
-    typeset -A installed
-    local mm
-    for mm in ${(f)models}; do [[ -n "$mm" ]] && installed[$mm]=1; done
-
-    if [[ -z "$models" ]]; then
-      _ERR_MENU_NO_MODELS=1
-      _row "No models installed yet — pick one below." "note"
-    else
-      # Append one menu row for a collapsed Ministral Instruct+Reasoning pair.
-      # Shows the full HF id of the half that will run (running variant wins,
-      # else the stored default, else Instruct); only one half is active at a
-      # time. Never runs both.
-      _err_add_ministral_row() {
-        local ins="$1" rea="$2" pref="" rp disp
-        local active="$ins"
-        if [[ -n "${running_for_model[$rea]}" ]]; then
-          active="$rea"
-        fi
-        if [[ -z "${running_for_model[$ins]}" && -z "${running_for_model[$rea]}" ]]; then
-          pref="$(cat "$state_dir/ministral-default" 2>/dev/null)"
-          [[ "$pref" == "$rea" ]] && active="$rea"
-        fi
-        if [[ -n "${running_for_model[$active]}" ]]; then
-          rport="${running_for_model[$active]##*	}"
-          think_suffix=""
-          [[ "$ERR_QUICK_THINKING" == "on" ]] && think_suffix=" thinking"
-          [[ "$ERR_QUICK_THINKING" == "off" ]] && think_suffix=" thinking off"
-          display="● $active$think_suffix"
-          _row "$display" "model" "$active" "$rport" "" "$ins"$'\t'"$rea"
-          (( first_running_idx < 0 )) && first_running_idx=$(( ${#_ERR_MENU_LINES[@]} - 1 ))
-        else
-          _row "$active" "model" "$active" "" "" "$ins"$'\t'"$rea"
-        fi
-      }
-
-      local -a downloaded=( ${(f)models} )
-      typeset -A dlset handled
-      for mm in "${downloaded[@]}"; do dlset[$mm]=1; done
-      for m in "${downloaded[@]}"; do
-        # Collapse a Ministral pair into a single row (handled via Instruct).
-        if [[ "${m##*/}" == *-Instruct-* ]]; then
-          sibfull=$(_err_ministral_sibling "$m")
-          if [[ -n "${dlset[$sibfull]}" ]]; then
-            handled[$sibfull]=1
-            _err_add_ministral_row "$m" "$sibfull"
-            continue
-          fi
-        fi
-        [[ -n "${handled[$m]}" ]] && continue
-        # The row shows the whole HF id (org/repo), not just the repo basename,
-        # so it is unambiguous and can be copied straight into another app.
-        if [[ -n "${running_for_model[$m]}" ]]; then
-          rport="${running_for_model[$m]##*	}"
-          think_suffix=""
-          [[ "$ERR_QUICK_THINKING" == "on" ]] && think_suffix=" thinking"
-          [[ "$ERR_QUICK_THINKING" == "off" ]] && think_suffix=" thinking off"
-          display="● $m$think_suffix"
-          _row "$display" "model" "$m" "$rport"
-          (( first_running_idx < 0 )) && first_running_idx=$(( ${#_ERR_MENU_LINES[@]} - 1 ))
-        else
-          _row "$m" "model" "$m"
-        fi
-      done
-    fi
-
-    # ---- Download group: curated picks that aren't installed yet, for this
-    # Mac's own RAM tier AND every lower one (a big Mac can still run the small
-    # picks). Same tier ladder as the Download screen — `_err_catalog_rows_
-    # for_ram` — so a single-entry tier never leaves the section looking empty.
-    # Ids are shown verbatim; the catalog carries no taglines.
-    _row "──────────────────────" "separator"
-    _row "Download new model:" "header"
-    local _ctier _ctname _ctitle _cids _ctags _cdesc n_downloads=0
-    while IFS=$'\x1f' read -r _ctier _ctname _ctitle _cids _ctags _cdesc; do
-      for m in ${(s: & :)_cids}; do
-        [[ -n "${installed[$m]}" ]] && continue
-        _row "$m" "download" "$m"
-        (( n_downloads++ ))
-      done
-    done < <(_err_catalog_rows_for_ram "$ram_gb" "$curated_file")
-    if (( n_downloads == 0 )) && ! _err_catalog_valid "$curated_file"; then
-      _row "No curated list available — paste an id below." "note"
-    fi
-    _row "  ────────────────────" "separator"
-    _row "Custom (paste HuggingFace ID)" "action" "" "" "download_custom"
-    _row "Open models folder" "action" "" "" "download_open"
-    # "All curated models…" (action 'download_all' → _err_download_menu) is
-    # deliberately not listed any more: the inline picks above are the download
-    # entry point. The action case and the full screen are still in the code, so
-    # re-adding the row below is all it takes to bring it back.
-    # _row "All curated models…" "action" "" "" "download_all"
-
-    # ---- Settings group
-    _row "──────────────────────" "separator"
-    _row "Basic settings" "action" "" "" "basic"
-    _row "Advanced settings" "action" "" "" "advanced"
-    _row "Chat history" "action" "" "" "history"
-    _row "Restart & refresh" "action" "" "" "restart"
-    if [[ -n "$_ERR_UPDATE_NEW" ]]; then
-      _row "Update to latest version" "action" "" "" "update"
-    fi
-
-    # ---- Lifecycle group
-    _row "──────────────────────" "separator"
-    _row "Stop & quit" "action" "" "" "quit"
-
-    _ERR_MENU_SCROLL=0
-    if (( first_running_idx >= 0 )); then
-      _ERR_MENU_CURSOR=$first_running_idx
-    else
-      # Otherwise start on the first row the cursor can land on.
-      _ERR_MENU_CURSOR=0
-      local i
-      for (( i=1; i<=${#_ERR_MENU_KINDS[@]}; i++ )); do
-        case "${_ERR_MENU_KINDS[$i]}" in
-          separator|header|note) continue ;;
-          *) _ERR_MENU_CURSOR=$(( i - 1 )); break ;;
-        esac
-      done
-    fi
-    _err_main_scroll_cursor
-  }
-
-  _err_main_render() {
-    local i idx line prefix kind n end footer has_running=0
-    # The menu repaints by moving the cursor up and clearing; without hiding it
-    # the terminal's blinking cursor would park on the empty line under the
-    # footer (the "flashing square"). _err_main_clear restores it before any
-    # sub-screen (gum dialogs, the chat REPL) so those keep a visible cursor.
-    print -n -- $'\e[?25l'
-    if (( _ERR_MENU_DRAWN )); then
-      print -n -- "\033[${_ERR_MENU_NLINES}A\033[J"
-    fi
-    local -a out=()
-    if (( ! _ERR_MENU_NO_MODELS )); then
-      out+=( $'\e[1;35mSelect model and run:\e[0m' )
-    fi
-    n=${#_ERR_MENU_LINES[@]}
-    end=$(( _ERR_MENU_SCROLL + _ERR_MENU_VIS ))
-    (( end > n )) && end=n
-    for (( i=_ERR_MENU_SCROLL; i<end; i++ )); do
-      idx=$i
-      line="${_ERR_MENU_LINES[$((idx+1))]}"
-      kind="${_ERR_MENU_KINDS[$((idx+1))]}"
-      prefix="  "
-      if (( idx == _ERR_MENU_CURSOR )); then
-        prefix="> "
-      fi
-      if [[ "$kind" == (separator|note) ]]; then
-        out+=( $'\e[2m'"$line"$'\e[0m' )
-      elif [[ "$kind" == "header" ]]; then
-        # Section label, styled like the "Select model and run:" heading above.
-        out+=( $'\e[1;35m'"$line"$'\e[0m' )
-      elif (( idx == _ERR_MENU_CURSOR )); then
-        out+=( $'\e[1;36m'"$prefix$line"$'\e[0m' )
-      else
-        out+=( "$prefix$line" )
-      fi
-    done
-    for (( i=1; i<=${#_ERR_MENU_PORTS[@]}; i++ )); do
-      [[ -n "${_ERR_MENU_PORTS[$i]}" ]] && { has_running=1; break; }
-    done
-    local footer_text
-    if (( has_running )); then
-      footer_text="↓↑ navigate • enter run/download • tab toggle thinking • ^s stop server • ^d delete • ^q quit"
-    else
-      footer_text="↓↑ navigate • enter run/download • ^d delete • ^q quit"
-    fi
-    footer_text="${footer_text:0:$(( _ERR_MENU_WIDTH - 1 ))}"
-    out+=( $'\e[2m'"$footer_text"$'\e[0m' )
-    _ERR_MENU_NLINES=0
-    for line in "${out[@]}"; do
-      print -n -- "$line\033[K\n"
-      (( _ERR_MENU_NLINES++ ))
-    done
-    _ERR_MENU_DRAWN=1
-  }
-
-  _err_main_clear() {
-    if (( _ERR_MENU_DRAWN )); then
-      print -n -- "\033[${_ERR_MENU_NLINES}A\033[J"
-      _ERR_MENU_DRAWN=0
-    fi
-    # Always give the cursor back, even if nothing was drawn (it may have been
-    # hidden by a render that was then cleared off-screen).
-    print -n -- $'\e[?25h'
-  }
-
-  _err_main_header() {
-    gum style --foreground 212 --bold "▌▌ err"
-    gum style --foreground 244 "Runs an MLX model behind an OpenAI-compatible REST API at localhost:11500"
-    if [[ -n "$_ERR_UPDATE_NEW" && -n "$_ERR_UPDATE_INSTALLED" ]]; then
-      gum style --foreground 226 --bold "▲ Update available: $_ERR_UPDATE_INSTALLED → $_ERR_UPDATE_NEW"
-    fi
-  }
-
-  _err_main_full_render() {
-    print -n -- "\033[2J\033[H"
-    _ERR_MENU_DRAWN=0
-    echo
-    _err_main_header
-    _err_main_render
-  }
-
-  _err_main_scroll_cursor() {
-    local n=${#_ERR_MENU_LINES[@]} max_scroll=$(( n - _ERR_MENU_VIS ))
-    (( max_scroll < 0 )) && max_scroll=0
-    (( _ERR_MENU_SCROLL > max_scroll )) && _ERR_MENU_SCROLL=$max_scroll
-    if (( _ERR_MENU_CURSOR < _ERR_MENU_SCROLL )); then
-      _ERR_MENU_SCROLL=$_ERR_MENU_CURSOR
-    elif (( _ERR_MENU_CURSOR >= _ERR_MENU_SCROLL + _ERR_MENU_VIS )); then
-      _ERR_MENU_SCROLL=$(( _ERR_MENU_CURSOR - _ERR_MENU_VIS + 1 ))
-    fi
-    (( _ERR_MENU_SCROLL < 0 )) && _ERR_MENU_SCROLL=0
-  }
-
-  _err_main_move() {
-    local delta="$1" n=${#_ERR_MENU_LINES[@]} new=$_ERR_MENU_CURSOR guard=$_ERR_MENU_CURSOR
-    while true; do
-      new=$(( new + delta ))
-      if (( new < 0 )); then new=$(( n - 1 )); fi
-      if (( new >= n )); then new=0; fi
-      case "${_ERR_MENU_KINDS[$((new+1))]}" in
-        separator|header|note) ;;
-        *) _ERR_MENU_CURSOR=$new; break ;;
-      esac
-      if (( new == guard )); then break; fi
-    done
-    _err_main_scroll_cursor
-  }
-
-  _err_main_rebuild_preserving() {
-    local kind="${_ERR_MENU_KINDS[$((_ERR_MENU_CURSOR+1))]}"
-    local model="${_ERR_MENU_MODELS[$((_ERR_MENU_CURSOR+1))]}"
-    local action="${_ERR_MENU_ACTIONS[$((_ERR_MENU_CURSOR+1))]}"
-    _err_main_build
-    local i
-    for (( i=1; i<=${#_ERR_MENU_KINDS[@]}; i++ )); do
-      if [[ "${_ERR_MENU_KINDS[$i]}" == "$kind" && "${_ERR_MENU_MODELS[$i]}" == "$model" && "${_ERR_MENU_ACTIONS[$i]}" == "$action" ]]; then
-        _ERR_MENU_CURSOR=$(( i - 1 ))
-        break
-      fi
-    done
-    _err_main_scroll_cursor
-    _err_main_render
-  }
-
-  _err_main_rebuild_full() {
-    local kind="${_ERR_MENU_KINDS[$((_ERR_MENU_CURSOR+1))]}"
-    local model="${_ERR_MENU_MODELS[$((_ERR_MENU_CURSOR+1))]}"
-    local action="${_ERR_MENU_ACTIONS[$((_ERR_MENU_CURSOR+1))]}"
-    _err_main_build
-    local i
-    for (( i=1; i<=${#_ERR_MENU_KINDS[@]}; i++ )); do
-      if [[ "${_ERR_MENU_KINDS[$i]}" == "$kind" && "${_ERR_MENU_MODELS[$i]}" == "$model" && "${_ERR_MENU_ACTIONS[$i]}" == "$action" ]]; then
-        _ERR_MENU_CURSOR=$(( i - 1 ))
-        break
-      fi
-    done
-    _err_main_scroll_cursor
-    _err_main_full_render
-  }
-
-  _err_main_toggle_thinking() {
-    local idx=$(( _ERR_MENU_CURSOR + 1 ))
-    local kind="${_ERR_MENU_KINDS[$idx]}"
-    [[ "$kind" != "model" ]] && return
-    local pair="${_ERR_MENU_PAIRS[$idx]}"
-    if [[ -n "$pair" ]]; then
-      # Ministral: swap between the Instruct and Reasoning halves. Never run
-      # both at once — stop whichever is up and launch the other, or just flip
-      # the stored default when neither is running.
-      local ins="${pair%%$'\t'*}" rea="${pair##*$'\t'}"
-      local cur="${_ERR_MENU_MODELS[$idx]}"
-      local other="$ins"; [[ "$cur" == "$ins" ]] && other="$rea"
-      local pair_port="${_ERR_MENU_PORTS[$idx]}"
-      local up="" pid port model
-      while IFS=$'\t' read -r pid port model; do
-        [[ -n "$pid" && ( "$model" == "$ins" || "$model" == "$rea" ) ]] && { up=1; pair_port="$port"; kill "$pid" 2>/dev/null; _err_drop "$pid"; }
-      done < <(_err_running)
-      print -r -- "$other" > "$state_dir/ministral-default"
-      _err_main_clear
-      if [[ -n "$up" ]]; then
-        local i
-        for i in {1..40}; do
-          _err_port_free "$pair_port" && break
-          sleep 0.2
-        done
-        echo "Switching to $(_err_ministral_base "$other")…"
-        _err_launch "$other" "$pair_port"
-      else
-        echo "Ministral: next start uses $(_err_ministral_base "$other")."
-      fi
-      _err_pause
-      _err_main_rebuild_preserving
-      return
-    fi
-    if [[ "$ERR_QUICK_THINKING" == "on" ]]; then
-      ERR_QUICK_THINKING="off"
-    else
-      ERR_QUICK_THINKING="on"
-    fi
-    _err_write_managed_block "$config_file"
-    _err_reload_config
-    _err_main_rebuild_preserving
-  }
-
-  _err_main_stop() {
-    local idx=$(( _ERR_MENU_CURSOR + 1 ))
-    local kind="${_ERR_MENU_KINDS[$idx]}"
-    local port="${_ERR_MENU_PORTS[$idx]}"
-    local model="${_ERR_MENU_MODELS[$idx]}"
-    if [[ "$kind" != "model" || -z "$port" ]]; then
-      return
-    fi
-    _err_main_clear
-    local pid _p _pt _m
-    while IFS=$'\t' read -r _p _pt _m; do
-      if [[ "$_m" == "$model" && "$_pt" == "$port" ]]; then
-        pid="$_p"
-        break
-      fi
-    done < <(_err_running)
-    if [[ -n "$pid" ]]; then
-      kill "$pid" 2>/dev/null && echo "Stopped: $model on :$port"
-      _err_drop "$pid"
-    else
-      echo "Server for $model was already gone."
-    fi
-    _err_pause
-    _err_main_rebuild_full
-  }
-
-  _err_main_delete() {
-    local idx=$(( _ERR_MENU_CURSOR + 1 ))
-    local kind="${_ERR_MENU_KINDS[$idx]}"
-    local model="${_ERR_MENU_MODELS[$idx]}"
-    local port="${_ERR_MENU_PORTS[$idx]}"
-    if [[ "$kind" != "model" ]]; then
-      return
-    fi
-    # A Ministral pair should be removed as a whole (both halves).
-    local pair="${_ERR_MENU_PAIRS[$idx]}"
-    local -a del=( "$model" )
-    if [[ -n "$pair" ]]; then
-      local ins="${pair%%$'\t'*}" rea="${pair##*$'\t'}"
-      del=( "$ins" "$rea" )
-    fi
-    _err_main_clear
-    local m folder pathdel=()
-    for m in "${del[@]}"; do
-      pathdel+=( "$hub_dir/models--${m//\//--}" )
-    done
-    local missing=0
-    for folder in "${pathdel[@]}"; do
-      [[ -d "$folder" ]] || missing=1
-    done
-    if (( missing )); then
-      echo "Folder not found."
-      _err_pause
-    else
-      local warn="" name="${del[1]}"
-      [[ -n "$pair" ]] && name="${del[1]} + ${del[2]}"
-      [[ -n "$port" ]] && warn=" (running server will be stopped first)"
-      if gum confirm "Remove $name from $hub_dir?$warn"; then
-        local pid _p _pt _mm skip
-        while IFS=$'\t' read -r _p _pt _mm; do
-          skip=""
-          for m in "${del[@]}"; do
-            [[ "$_mm" == "$m" ]] && { skip=1; break; }
-          done
-          if [[ -n "$_p" && -n "$skip" ]]; then
-            kill "$_p" 2>/dev/null && _err_drop "$_p"
-          fi
-        done < <(_err_running)
-        for folder in "${pathdel[@]}"; do
-          rm -rf "$folder"
-        done
-        rm -f "$state_dir/ministral-default"
-        echo "Removed: $name"
-        # The model folders above only held symlinks; the real weights live in
-        # the shared hub/blobs/ store. Sweep it so blobs orphaned by this
-        # removal (no longer referenced by any cached model) free their space.
-        _err_purge_orphan_blobs "$hub_dir"
-        _err_pause
-      fi
-    fi
-    _err_main_rebuild_full
-  }
-
-  # "Update to latest version" from the menu — adapts to how err was installed:
-  # a git clone pulls + re-runs install.sh; a pi-managed package tells the user
-  # to use `pi update`; anything else (e.g. the stable copy from /err-setup) asks
-  # for a re-install. Re-checks afterwards so the banner clears once current.
-  _err_do_update() {
-    _err_main_clear
-    gum style --foreground 212 --bold "Updating err"
-    if [[ -d "$_ERR_SRC_DIR/.git" ]]; then
-      echo "Pulling latest from git ($_ERR_SRC_DIR):"
-      if git -C "$_ERR_SRC_DIR" pull --ff-only; then
-        sh "$_ERR_SRC_DIR/install.sh"
-        echo
-        gum style --foreground 82 --bold "err updated — quit and re-run err to use the new version."
-        _err_check_update
-      else
-        echo "git pull had problems — resolve conflicts in $_ERR_SRC_DIR, then retry."
-      fi
-    elif [[ "$_ERR_SRC_DIR" == "$HOME"/.pi/agent/git/* ]]; then
-      echo "This install is managed by pi (a pi package). Update it from a terminal:"
-      echo "  pi update --extensions"
-      echo "then restart err."
-    else
-      # Managed copy (installed via curl/install.sh, no .git). Fetch the
-      # latest install.sh and re-run it with ERR_FORCE=1 + ERR_REF=main so it
-      # re-downloads the newest source — a plain re-run of the copy's own
-      # install.sh wouldn't refresh it (and an old one won't know the flag).
-      echo "Refreshing managed copy from GitHub…"
-      local up_sh="$state_dir/install-update.sh"
-      if curl -fsSL --connect-timeout 3 --max-time 20 \
-           "https://raw.githubusercontent.com/pavsefcik/err/main/install.sh" \
-           -o "$up_sh" 2>/dev/null; then
-        if ERR_FORCE=1 ERR_REF=main sh "$up_sh"; then
-          echo
-          gum style --foreground 82 --bold "err updated — restart err to use the new version."
-          _err_check_update
-        else
-          echo "Update failed — check the install output above, then retry."
-        fi
-      else
-        echo "Couldn't download the latest install.sh (offline?) — update aborted."
-      fi
-    fi
-    _err_pause
-    _err_main_rebuild_full
-  }
-
-  _err_main_quit() {
-    _err_main_clear
-    local choice
-    choice=$(printf 'Stop all models & quit\nQuit, leave models running\nCancel' | gum choose --header "Quit err?" --height 6)
-    case "$choice" in
-      "Stop all models & quit")
-        _err_stop_all >/dev/null 2>&1
-        _ERR_MENU_QUIT=1
-        return 0
-        ;;
-      "Quit, leave models running")
-        # Detach any servers started this session so the EXIT trap doesn't stop
-        # them: they keep serving on their ports after err exits.
-        _ERR_SESSION_PIDS=()
-        _ERR_BYE_STOPPED=0
-        _ERR_BYE_LEFT_RUNNING=1
-        _ERR_MENU_QUIT=1
-        return 0
-        ;;
-    esac
-    _err_main_full_render
-    return 1
-  }
-
-  _err_main_activate() {
-    local idx=$(( _ERR_MENU_CURSOR + 1 ))
-    local kind="${_ERR_MENU_KINDS[$idx]}"
-    local model="${_ERR_MENU_MODELS[$idx]}"
-    local port="${_ERR_MENU_PORTS[$idx]}"
-    local action="${_ERR_MENU_ACTIONS[$idx]}"
-    [[ "$kind" == (separator|header|note) ]] && return
-    _err_main_clear
-    if [[ "$kind" == "download" ]]; then
-      # Curated suggestion: download it, then rebuild (the flow offers to start
-      # the model, and a fresh install re-sorts the menu).
-      _err_download_flow "$model" "$model"
-    elif [[ "$kind" == "model" ]]; then
-      if [[ -n "$port" ]]; then
-        # Already running — just chat with it.
-        _err_chat_repl "$model" "$port"
-      elif [[ -n "$(_err_running)" ]]; then
-        # A different model is running: swap, run alongside, or cancel.
-        local choice
-        choice=$(printf 'Yes\nNo\nRun in parallel' | gum choose --header "Do you want to swap models? (a model is already running)" --height 6)
-        case "$choice" in
-          "Yes")
-            # Swap: stop everything, then run the selected model on :11500.
-            _err_stop_all >/dev/null 2>&1
-            local i
-            for i in {1..40}; do
-              _err_port_free 11500 && break
-              sleep 0.2
-            done
-            if _err_launch "$model"; then
-              _err_chat_repl "$model" "$_ERR_LAST_LAUNCH_PORT"
-            fi
-            ;;
-          "Run in parallel")
-            if _err_launch "$model"; then
-              _err_chat_repl "$model" "$_ERR_LAST_LAUNCH_PORT"
-            fi
-            ;;
-          *) : ;;   # No / esc — back to the menu
-        esac
-      else
-        if _err_launch "$model"; then
-          _err_chat_repl "$model" "$_ERR_LAST_LAUNCH_PORT"
-        fi
-      fi
-    else
-      case "$action" in
-        update) _err_do_update ;;
-        # Reachable only if the "All curated models…" row is re-added above.
-        download_all) _err_download_menu ;;
-        download_custom)
-          local custom
-          custom=$(gum input --placeholder "e.g. mlx-community/Ministral-3-3B-Instruct-2512-4bit" --prompt "Model: ")
-          [[ -n "$custom" ]] && _err_download_flow "$custom" "$custom"
-          ;;
-        download_open) open "$hub_dir" ;;
-        history) _err_chat_history_menu ;;
-        basic) _err_basic_settings_menu ;;
-        advanced) _err_advanced_settings_menu ;;
-        restart) _err_main_restart ;;
-        quit) _err_main_quit ;;
-      esac
-    fi
-    (( _ERR_MENU_QUIT )) && return
-    _err_main_rebuild_full
-  }
-
-  _err_main_read_key() {
-    local k1 k2 k3
-    read -s -k1 k1
-    local st=$?
-    if (( st != 0 )); then
-      _ERR_MENU_KEY=""
-      return
-    fi
-    if [[ "$k1" == $'\e' ]]; then
-      if read -s -k1 -t 0.05 k2; then
-        if read -s -k1 -t 0.05 k3; then
-          _ERR_MENU_KEY=$'\e'"$k2$k3"
-        else
-          _ERR_MENU_KEY=$'\e'"$k2"
-        fi
-      else
-        _ERR_MENU_KEY=$'\e'
-      fi
-    else
-      _ERR_MENU_KEY="$k1"
-    fi
-  }
-
-  _err_main_standard() {
-    local _up1=$'\e'[A _up2=$'\e'OA _down1=$'\e'[B _down2=$'\e'OB
-    local _term_lines=${LINES:-24}
-    (( _term_lines < 8 )) && _term_lines=24
-    _ERR_MENU_VIS=$(( _term_lines - 6 ))
-    (( _ERR_MENU_VIS < 1 )) && _ERR_MENU_VIS=1
-    _ERR_MENU_WIDTH=${COLUMNS:-80}
-    (( _ERR_MENU_WIDTH < 40 )) && _ERR_MENU_WIDTH=80
-    (( _ERR_MENU_VIS < 1 )) && _ERR_MENU_VIS=1
-    _ERR_MENU_QUIT=0
-    _ERR_MENU_DRAWN=0
-    _ERR_MENU_NLINES=0
-    stty -ixon 2>/dev/null
-    _err_main_build
-    _err_main_render
-    while true; do
-      _err_main_read_key
-      if [[ -z "$_ERR_MENU_KEY" ]]; then
-        # EOF is not a request to stop anything: the EXIT trap already stops
-        # the servers this TUI started, and `err run` servers must survive.
-        _ERR_MENU_QUIT=1
-        break
-      fi
-      local key="$_ERR_MENU_KEY"
-      if [[ "$key" == "$_up1" || "$key" == "$_up2" ]]; then
-        _err_main_move -1
-        _err_main_render
-      elif [[ "$key" == "$_down1" || "$key" == "$_down2" ]]; then
-        _err_main_move 1
-        _err_main_render
-      elif [[ "$key" == $'\n' || "$key" == $'\r' ]]; then
-        _err_main_activate
-        (( _ERR_MENU_QUIT )) && break
-      elif [[ "$key" == $'\t' ]]; then
-        _err_main_toggle_thinking
-      elif [[ "$key" == $'\x13' ]]; then
-        _err_main_stop
-      elif [[ "$key" == $'\x04' ]]; then
-        _err_main_delete
-      elif [[ "$key" == $'\x11' || "$key" == $'\e' ]]; then
-        if _err_main_quit; then
-          break
-        fi
-      fi
-    done
-  }
-
-  # Self-update notice: compare the installed version (VERSION file next to this
-  # script) with the latest on GitHub. Interactive menu only — headless runs
-  # (run/stop/status) skip the network call. Short timeout; offline = no banner.
-  _err_check_update() {
-    (( $# == 0 )) || return 0
-    local installed="$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
-    [[ -n "$installed" ]] || return 0
-    _ERR_UPDATE_NEW=""
-    _ERR_UPDATE_INSTALLED=""
-    local latest_file="$state_dir/latest-version" latest
-    if curl -fsSL --connect-timeout 3 --max-time 5 "https://raw.githubusercontent.com/pavsefcik/err/main/VERSION" -o "$latest_file" 2>/dev/null; then
-      latest="$(tr -d '[:space:]' < "$latest_file")"
-      if [[ -n "$latest" ]] && _err_version_gt "$latest" "$installed"; then
-        _ERR_UPDATE_INSTALLED="$installed"
-        _ERR_UPDATE_NEW="$latest"
-      fi
-    fi
   }
 
   # Headless (non-interactive) helpers -------------------------------
@@ -1996,16 +368,45 @@ PY
     return 1
   }
 
+  # Fast, colour-cycling launch wheel. Terminal only: a pipe/CI/test gets the
+  # plain message once (from the callers) and no carriage returns.
+  _err_spin_tick() {  # index message
+    local i="${1:-1}" msg="${2:-}"
+    local -a frames=( ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ )
+    local -a colors=( 45 51 87 123 129 165 201 207 214 220 )
+    local f="${frames[$(( (i - 1) % ${#frames} + 1 ))]}"
+    local c="${colors[$(( (i - 1) % ${#colors} + 1 ))]}"
+    printf '\r\e[38;5;%sm%s\e[0m %s' "$c" "$f" "$msg" >&2
+  }
+
+  # One status line that is rewritten in place: stopping -> loading -> running.
+  # Off a terminal there is nothing to rewrite, so each state gets its own line.
+  _err_status_set() {
+    if [[ -t 2 ]]; then
+      printf '\r\033[K%s' "$*" >&2
+    else
+      print -u2 -- "$*"
+    fi
+  }
+
+  # Drop the in-place status line before an error message needs a fresh line.
+  _err_status_clear() {
+    [[ -t 2 ]] && printf '\r\033[K' >&2
+    return 0
+  }
+
   _err_headless_launch() {
     local model="$1" want_port="${2:-11500}"
     local unsupported
     if unsupported=$(_err_model_unsupported_reason "$model" "$hub_dir"); then
+      _err_status_clear
       print -u2 "err: $model can't be served — $unsupported."
       print -u2 "MLX-quantized repos run directly (e.g. mlx-community/…-4bit)."
       return 1
     fi
     local port="$want_port"
     if ! _err_port_free "$port"; then
+      _err_status_clear
       print -u2 "err: port $port is busy — stop the running model first (err stop)"
       return 1
     fi
@@ -2025,25 +426,37 @@ PY
     ERR_PROCTITLE="$model" PYTHONPATH="$_ERR_SRC_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" \
       "${reply[@]}" >"$log" 2>&1 &!
     local pid=$!
-    print "err: starting $model on :$port (pid $pid) — log: $log"
+    local url="http://127.0.0.1:$port"
+    # One line, rewritten: loading (with spinner), then the
+    # `arr // running: …` action line replaces it.
+    _err_status_set "loading $model on $url"
+    local spin=0
+    if [[ -t 2 ]]; then
+      spin=1
+      _err_spin_tick 1 "loading $model on $url"
+    fi
     local i
-    for i in {1..2400}; do   # ~ up to 20 min for large/quantized models
+    for i in {1..6000}; do   # ~ up to 20 min for large/quantized models
+      (( spin )) && _err_spin_tick "$i" "loading $model on $url"
       if ! kill -0 "$pid" 2>/dev/null; then
+        (( spin )) && printf '\r\033[K' >&2
         print -u2 "err: server exited while loading — last log lines:"
         tail -n 20 "$log" >&2
         return 1
       fi
-      if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
-        print "err: ready $model on :$port (pid $pid)"
+      if _err_server_ready "$port"; then
+        (( spin )) && printf '\r\033[K' >&2
+        _err_say "running: $model on $url"
         return 0
       fi
-      sleep 0.5
+      sleep 0.2
     done
+    (( spin )) && printf '\r\033[K' >&2
     print -u2 "err: timed out waiting for $model to serve — log: $log"
     return 1
   }
 
-  # ── headless model pickers (gum) ──────────────────────────────────
+  # ── headless model pickers ────────────────────────────────────────
   # Every management verb falls back to one of these when it is called with no
   # model id, so `err run` / `err switch` / `err download` are menus, and
   # `err run <id>` still works verbatim for scripts and the pi extension.
@@ -2052,7 +465,7 @@ PY
   # The on-device Apple model is a backend, not an MLX repo: it is served by
   # `fm serve` on its own port (err.conf `port`, default 8080) and needs no
   # download. It appears in the same menus as a sentinel id so `err run`,
-  # `err switch` and `err default` all understand it.
+  # `err swap` understands it.
   typeset -g _ERR_FM_ID="apple-fm"
 
   _err_fm_port() {
@@ -2082,7 +495,7 @@ PY
   _err_fm_start() {
     local pid port; port=$(_err_fm_port)
     if pid=$(_err_fm_running); then
-      print "err: Apple Foundation Model already serving on :$port (pid $pid)"
+      _err_say "$_ERR_FM_ID already running"
       _err_note_last_model "$_ERR_FM_ID"
       return 0
     fi
@@ -2090,22 +503,35 @@ PY
       print -u2 "err: the Foundation Models CLI (fm) is missing — it ships with macOS 26+"
       return 1
     fi
-    local log="$log_dir/fm-$port.log"
-    print "err: starting the Apple Foundation Model on :$port…"
+    local log="$log_dir/fm-$port.log" fmpid
+    local url="http://127.0.0.1:$port"
+    _err_status_set "loading $_ERR_FM_ID on $url"
+    local spin=0
+    if [[ -t 2 ]]; then
+      spin=1
+      _err_spin_tick 1 "loading $_ERR_FM_ID on $url"
+    fi
     nohup fm serve --host 127.0.0.1 --port "$port" >"$log" 2>&1 &!
+    fmpid=$!
     local i
-    for i in {1..120}; do
-      if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
-        print "err: ready $_ERR_FM_ID on :$port"
-        print "  endpoint: http://127.0.0.1:$port/v1"
+    for i in {1..300}; do
+      (( spin )) && _err_spin_tick "$i" "loading $_ERR_FM_ID on $url"
+      if curl -fs -o /dev/null --max-time 1 "$url/v1/models" 2>/dev/null; then
+        if (( spin )); then
+          printf '\r\033[K' >&2
+        fi
+        _err_say "running: $_ERR_FM_ID on $url"
+        print "  endpoint: $url/v1"
         # One place arms the idle watchdog (err.py owns the logic); without it
-        # an engine-started fm server never shuts down.
-        python3 "$_ERR_SRC_DIR/err.py" --watchdog "$pid" >/dev/null 2>&1 &
+        # an engine-started fm server never shuts down. The pid must be the one
+        # we just started: `pid` is still unset on this path.
+        python3 "$_ERR_SRC_DIR/err.py" --watchdog "${fmpid:-$pid}" >/dev/null 2>&1 &!
         _err_note_last_model "$_ERR_FM_ID"
         return 0
       fi
-      sleep 0.5
+      sleep 0.2
     done
+    (( spin )) && printf '\r\033[K' >&2
     print -u2 "err: fm did not answer on :$port — log: $log"
     return 1
   }
@@ -2113,18 +539,34 @@ PY
   _err_fm_stop() {
     local pid port; port=$(_err_fm_port)
     if pid=$(_err_fm_running); then
-      kill "$pid" 2>/dev/null && print "err: stopped the Apple Foundation Model (:$port)"
+      kill "$pid" 2>/dev/null && _err_say "stopped the Apple Foundation Model (:$port)"
       return 0
     fi
     return 1
   }
 
-  # The model `err run`/`err chat` prefer. With no explicit choice, err's own
+  # The model `err run` prefers. With no explicit choice, err's own
   # backend is the honest default: `backend = fm|pcc` in err.conf means the
   # on-device Apple model is what you get when you just type `err`.
+  # err's own action lines — "here is what I just did". They carry the same
+  # `arr //` prefix and amber as the model's answers, so a status line never
+  # reads as shell output. Colour only on a terminal, like err.py's answers.
+  _err_say() {
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      print -r -- $'\e[1;38;5;214marr //\e[0m '"$*"
+    else
+      print -r -- "arr // $*"
+    fi
+  }
+
   _err_default_model() {
-    local f="$state_dir/default-model" m="" b=""
-    if [[ -r "$f" ]]; then
+    # There is no `err default` any more: the model you last ran or swapped to
+    # IS the default, which is also what err.py answers from.
+    local f="$state_dir/default-model" m="" b="" last="$state_dir/last-model"
+    if [[ -r "$last" ]]; then
+      m="$(<"$last")"; m="${m//[[:space:]]/}"
+    fi
+    if [[ -z "$m" && -r "$f" ]]; then
       m="$(<"$f")"; m="${m//[[:space:]]/}"
     fi
     if [[ -z "$m" && -r "$(_err_conf_path)" ]]; then
@@ -2148,10 +590,25 @@ PY
   _ERR_FM_LABEL="apple-fm  (Apple on-device)"
 
   # Rewrite one `key = value` line in err.conf, leaving every other line
-  # untouched. This is how `err switch`/`err default` reach the explain layer:
+  # untouched. This is how `err run`/`err swap` reach the explain layer:
   # err.conf -> backend is what err.py actually reads.
   # Tests and multi-profile setups can point the whole stack at another file.
-  _err_conf_path() { print -r -- "${ERR_CONF:-$_ERR_SRC_DIR/err.conf}" }
+  # ── one config file ────────────────────────────────────────────────
+  # `$ERR_STATE_DIR/err.conf`, seeded from the repo template on first run. Flat
+  # `key = value`, so err.py (stdlib) and this engine read the same file. Flags
+  # are repeated `server_flag = --kv-bits 8` lines instead of a zsh array —
+  # which is why config.zsh is gone: one file, one vocabulary, no managed block.
+  _err_conf_path() { print -r -- "${ERR_CONF:-$config_file}" }
+
+  _err_conf_get() {
+    local key="$1" f
+    f=$(_err_conf_path)
+    [[ -r "$f" ]] || return 1
+    # ${key} braces matter: `$key[...]` is an array subscript in zsh, not a
+    # regex — it fails with "bad output format specification".
+    grep -E "^[[:space:]]*${key}[[:space:]]*=" "$f" 2>/dev/null | head -1 \
+      | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//'
+  }
 
   _err_conf_set() {
     local key="$1" value="$2" f tmp
@@ -2166,9 +623,76 @@ PY
     ' "$f" > "$tmp" && mv "$tmp" "$f"
   }
 
-  # err.py resolves the backend as `ERR_BACKEND` env -> err.conf. Status and
-  # the switch/default messages must show the SAME thing, or a stray exported
-  # ERR_BACKEND makes the file say mlx while err keeps answering from fm.
+  # First run: copy the template, then lift an old config.zsh across once (its
+  # managed block and flag arrays become keys here), leaving it in place so a
+  # downgrade still finds it.
+  _err_conf_seed() {
+    local f old="$state_dir/config.zsh" line k v kv
+    f=$(_err_conf_path)      # ERR_CONF wins, then the state copy
+    [[ -e "$f" ]] && return 0
+    mkdir -p "${f:h}" 2>/dev/null
+    if [[ -r "$_ERR_SRC_DIR/err.conf" ]]; then
+      cp -f "$_ERR_SRC_DIR/err.conf" "$f" 2>/dev/null || return 1
+    else
+      : > "$f" || return 1
+    fi
+    [[ -r "$old" ]] || return 0
+    kv=$(zsh -f -c '
+      source "$1" 2>/dev/null
+      [[ -n "${ERR_QUICK_THINKING:-}" && "$ERR_QUICK_THINKING" != default ]] && print -r -- "thinking=$ERR_QUICK_THINKING"
+      [[ -n "${ERR_QUICK_TEMP:-}" ]] && print -r -- "temperature=$ERR_QUICK_TEMP"
+      [[ -n "${ERR_QUICK_MAX_TOKENS:-}" ]] && print -r -- "max_tokens=$ERR_QUICK_MAX_TOKENS"
+      [[ -n "${ERR_QUICK_SYSTEM_PROMPT:-}" ]] && print -r -- "chat_system_prompt=$ERR_QUICK_SYSTEM_PROMPT"
+      [[ -n "${ERR_QUICK_MOE_CACHE:-}" ]] && print -r -- "moe_cache_gib=$ERR_QUICK_MOE_CACHE"
+      local fl
+      for fl in "${ERR_CHAT_FLAGS[@]}"; do [[ -n "$fl" ]] && print -r -- "chat_flag=$fl"; done
+      for fl in "${ERR_SERVER_FLAGS[@]}"; do [[ -n "$fl" ]] && print -r -- "server_flag=$fl"; done
+    ' _ "$old" 2>/dev/null)
+    [[ -z "$kv" ]] && return 0
+    for line in ${(f)kv}; do
+      k="${line%%=*}"; v="${line#*=}"
+      case "$k" in
+        chat_flag|server_flag) print -r -- "$k = $v" >> "$f" ;;
+        *) _err_conf_set "$k" "$v" ;;
+      esac
+    done
+    print -u2 "err: config is now $f (old config.zsh left in place)"
+  }
+
+  # Load the file into the variables the launch path already uses, so nothing
+  # downstream changes. Repeated flag lines rebuild the arrays.
+  _err_load_config() {
+    _err_conf_seed
+    local f; f=$(_err_conf_path)
+    ERR_QUICK_THINKING="default"
+    ERR_QUICK_TEMP=""; ERR_QUICK_MAX_TOKENS=""
+    ERR_QUICK_SYSTEM_PROMPT=""; ERR_QUICK_MOE_CACHE=""
+    typeset -ga ERR_CHAT_FLAGS=( --max-tokens 2048 --temperature 0.7 )
+    typeset -ga ERR_SERVER_FLAGS=()
+    if [[ -r "$f" ]]; then
+      local line k v
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || continue
+        k="${line%%=*}"; v="${line#*=}"
+        k="${k//[[:space:]]/}"
+        v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+        case "$k" in
+          thinking)           ERR_QUICK_THINKING="${v:-default}" ;;
+          temperature)        ERR_QUICK_TEMP="$v" ;;
+          max_tokens)         ERR_QUICK_MAX_TOKENS="$v" ;;
+          chat_system_prompt) ERR_QUICK_SYSTEM_PROMPT="$v" ;;
+          moe_cache_gib)      ERR_QUICK_MOE_CACHE="$v" ;;
+          apc_enabled)        export APC_ENABLED="$v" ;;
+          apc_disk_max_gb)    export APC_DISK_MAX_GB="$v" ;;
+          chat_flag)          ERR_CHAT_FLAGS+=( ${=v} ) ;;
+          server_flag)        ERR_SERVER_FLAGS+=( ${=v} ) ;;
+        esac
+      done < "$f"
+    fi
+    _err_apply_quick
+  }
+
   _err_effective_backend() {
     local env_be file_be
     env_be="${ERR_BACKEND:-}"
@@ -2180,16 +704,6 @@ PY
     fi
   }
 
-  _err_conf_get() {
-    local key="$1" f
-    f=$(_err_conf_path)
-    [[ -r "$f" ]] || return 1
-    # ${key} braces matter: `$key[...]` is an array subscript in zsh, not a
-    # regex — it fails with "bad output format specification".
-    grep -E "^[[:space:]]*${key}[[:space:]]*=" "$f" 2>/dev/null | head -1 \
-      | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]'
-  }
-
   # Point the explain layer at a model: the Apple on-device model runs on `fm`
   # (or Private Cloud Compute), every HF repo runs on the :11500 server.
   _err_point_backend_at() {
@@ -2197,114 +711,341 @@ PY
     if [[ "$model" == "$_ERR_FM_ID" ]]; then
       cur=$(_err_conf_get backend)
       [[ "$cur" == pcc ]] || _err_conf_set backend fm
-      print "err: explain/ask now uses the on-device Apple model"
     else
       _err_conf_set backend mlx
-      print "err: explain/ask now uses $model on :11500"
-      print "  (starts on demand; 'err run $model' starts it now)"
     fi
     # A stray exported ERR_BACKEND beats the file, and that is invisible unless
     # we say so: the user changes the setting, sees it "applied", and err keeps
     # answering from the old backend.
     if [[ -n "${ERR_BACKEND:-}" ]]; then
-      print -u2 "err: ⚠ this shell exports ERR_BACKEND=$ERR_BACKEND, which overrides"
+      print -u2 "err: warning: this shell exports ERR_BACKEND=$ERR_BACKEND, which overrides"
       print -u2 "     err.conf. Run 'unset ERR_BACKEND' (or start a new shell)."
     fi
   }
 
-  # Run the gum chooser over stdin and map the label back to a model id.
-  # Header is white (gum defaults to purple 99) and sits one line below the
-  # command. Cancelling is not an error: esc must abort silently, not fall
-  # through to another menu.
+  # One renderer for the submenus, with err's look: `arr //` on the cursor
+  # row, the rest indented to match, one dim footer line, no title (the rows
+  # are the commands, so a heading would only repeat the first word).
+  #
+  # No dialog toolkit: this is the whole menu. One footer line carries the
+  # keys, so the hint text is err's, not a dependency's.
+  #
+  #   _err_pick [--multi] [--header text] label...
+  #
+  # Rows are arguments (the keyboard has to be the terminal); painting goes to
+  # /dev/tty and only the chosen label(s) go to stdout, because callers capture
+  # stdout (`pick=$(_err_pick ...)`). Esc is a plain cancel, never a fall-through.
   _err_pick() {
-    local header="$1" choice
-    # Do NOT redirect gum's stderr: bubbletea renders the whole menu there and
-    # only the chosen line goes to stdout, so `2>file` makes `err run` look like
-    # it does nothing. Command substitution already isolates stdout.
-    choice=$(gum choose --header $'\n'"$header" --header.foreground 255 --height 20)
-    if (( $? != 0 )) || [[ -z "$choice" ]]; then
-      # gum prints its own "nothing selected" line after restoring the screen;
-      # wipe it so esc looks like a plain cancel.
-      print -n $'\e[1A\e[2K\r'
+    local multi=0 header=""
+    while (( $# )); do
+      case "$1" in
+        --multi)  multi=1; shift ;;
+        --header) header="${2:-}"; shift 2 ;;
+        *) break ;;
+      esac
+    done
+    local -a rows=( "$@" )
+    local footer='←↓↑→ navigate • esc return • enter submit'
+    (( multi )) && footer='←↓↑→ navigate • space mark • enter submit • esc return'
+
+    # Test seam: a pty with nobody typing would block forever. Dump the rows
+    # and cancel, which is what a caller off a terminal sees.
+    if [[ -n "${ERR_PICK_DUMP:-}" ]]; then
+      [[ -n "$header" ]] && printf '%s\n' "$header" >&2
+      (( ${#rows[@]} )) && printf '%s\n' "${rows[@]}" >&2
       return 1
     fi
-    [[ -n "${_ERR_PICK_MAP[$choice]:-}" ]] && print -r -- "${_ERR_PICK_MAP[$choice]}"
+
+    # Paint on stderr and read the keyboard from stdin: the caller captures
+    # stdout, so the frame must not go there, and `read -k`
+    # only puts the terminal into raw mode when stdin *is* the terminal — an
+    # fd opened separately for /dev/tty gets keys only after Enter.
+    #
+    # No terminal (a pipe, a script, CI): print the rows so the menu is
+    # visible, then abort. A picker that cannot render must never loop.
+    if [[ ! -t 0 || ! -t 2 ]] || (( ${#rows[@]} == 0 )); then
+      (( ${#rows[@]} )) && printf '%s\n' "${rows[@]}" >&2
+      return 1
+    fi
+
+    local n=${#rows[@]} cursor=0 scroll=0 drawn=0 nlines=0
+    local term_lines width
+    read -r term_lines width <<< "$(_err_term_size)"
+    # vis rows + one footer line must fit, or the repaint scrolls the screen.
+    local vis=$(( term_lines - 4 ))   # rows + blank + footer must fit
+    (( vis < 3 )) && vis=3
+    (( vis > n )) && vis=n
+    typeset -A marked=()
+
+    _pick_scroll() {
+      local max=$(( n - vis ))
+      (( max < 0 )) && max=0
+      (( scroll > max )) && scroll=$max
+      if (( cursor < scroll )); then
+        scroll=$cursor
+      elif (( cursor >= scroll + vis )); then
+        scroll=$(( cursor - vis + 1 ))
+      fi
+      (( scroll < 0 )) && scroll=0
+    }
+    _pick_clear() {
+      if (( drawn )); then
+        print -u2 -n -- "\033[${nlines}A\033[J"
+        drawn=0
+      fi
+      print -u2 -n -- $'\e[?25h'
+    }
+    _pick_render() {
+      print -u2 -n -- $'\e[?25l'
+      (( drawn )) && print -u2 -n -- "\033[${nlines}A\033[J"
+      local -a out=()
+      if [[ -n "$header" ]]; then
+        local first=1 hline
+        for hline in "${(@f)header}"; do
+          hline="${hline:0:$(( width - 1 ))}"
+          if (( first )); then
+            out+=( $'\e[1;35m'"$hline"$'\e[0m' )
+            first=0
+          else
+            out+=( "$hline" )
+          fi
+        done
+        # The help menu's header is a block (version, "Available commands:",
+        # the typed-only rows). Keep one blank line before the pickable rows.
+        [[ "$header" == *$'\n'* ]] && out+=( '' )
+      fi
+      local end=$(( scroll + vis )) i text pref
+      (( end > n )) && end=n
+      for (( i=scroll; i<end; i++ )); do
+        text="${rows[$((i+1))]}"
+        if (( i == cursor )); then
+          (( multi && ${marked[$((i+1))]:-0} )) \
+            && out+=( $'\e[1;32marr // '"$text"$'\e[0m' ) \
+            || out+=( $'\e[1;36marr // '"$text"$'\e[0m' )
+        else
+          if (( multi && ${marked[$((i+1))]:-0} )); then pref=$'\e[1;32m*      '
+          else pref='       '
+          fi
+          out+=( "$pref$text"$'\e[0m' )
+        fi
+      done
+      out+=( '' )
+      out+=( $'\e[2m'"${footer:0:$(( width - 1 ))}"$'\e[0m' )
+      nlines=0
+      local line
+      for line in "${out[@]}"; do
+        print -u2 -n -- "$line\033[K\n"
+        (( nlines++ ))
+      done
+      drawn=1
+    }
+
+    local key seq third i
+    _pick_render
+    while true; do
+      read -s -k 1 key || break
+      case "$key" in
+        $'\r'|$'\n')
+          _pick_clear
+          if (( multi )); then
+            local -a picked=()
+            for (( i=1; i<=n; i++ )); do
+              (( ${marked[$i]:-0} )) && picked+=( "${rows[$i]}" )
+            done
+            (( ${#picked[@]} )) || return 1
+            printf '%s\n' "${picked[@]}"
+          else
+            print -r -- "${rows[$((cursor+1))]}"
+          fi
+          return 0 ;;
+        ' ')
+          (( multi )) && (( marked[$((cursor+1))] = ! ${marked[$((cursor+1))]:-0} )) ;;
+        $'\e')
+          # An arrow key is ESC [ A/B, a plain ESC is the cancel.
+          seq=""
+          read -s -t 0.05 -k 1 seq
+          if [[ "$seq" == ('['|'O') ]]; then
+            third=""
+            read -s -t 0.05 -k 1 third
+            local tail=""
+            case "$third" in
+              A) (( cursor > 0 )) && (( cursor-- )) ;;
+              B) (( cursor < n - 1 )) && (( cursor++ )) ;;
+              # PgUp/PgDn (5~/6~) page, Home/End (1~/4~/H/F) jump.
+              5|6|1|4)
+                read -s -t 0.05 -k 1 tail
+                case "$third$tail" in
+                  5~) (( cursor -= vis - 1 )) ;;
+                  6~) (( cursor += vis - 1 )) ;;
+                  1~) cursor=0 ;;
+                  4~) cursor=$(( n - 1 )) ;;
+                esac
+                (( cursor < 0 )) && cursor=0
+                (( cursor >= n )) && cursor=$(( n - 1 )) ;;
+              H) cursor=0 ;;
+              F) cursor=$(( n - 1 )) ;;
+            esac
+            _pick_scroll
+          else
+            break
+          fi ;;
+        k|K) (( cursor > 0 )) && (( cursor-- )); _pick_scroll ;;
+        j|J) (( cursor < n - 1 )) && (( cursor++ )); _pick_scroll ;;
+        a|A)
+          if (( multi )); then
+            local all=1
+            for (( i=1; i<=n; i++ )); do (( ${marked[$i]:-0} )) || all=0; done
+            for (( i=1; i<=n; i++ )); do
+              if (( all )); then marked[$i]=0; else marked[$i]=1; fi
+            done
+          fi ;;
+      esac
+      _pick_render
+    done
+    _pick_clear
+    return 1
   }
 
   # Human label for a selectable row. The Apple model gets a description; HF
   # repos are already readable. Both markers below are two columns wide, so the
-  # rows line up under gum's cursor column (★ and friends are double-width and
-  # visibly shift the list).
+  # rows line up under the 7-column `arr // ` cursor (★ and friends are
+  # double-width and visibly shift the list).
   _err_row_label() {
     if [[ "$1" == "$_ERR_FM_ID" ]]; then print -r -- "$_ERR_FM_LABEL"
     else print -r -- "$1"; fi
   }
 
-  # Installed models plus the on-device Apple model, default pinned to the top.
-  _err_pick_installed() {
-    local header="${1:-Pick a model}" def id mark label
-    def=$(_err_default_model)
-    local -a ids=( ${(f)"$(_err_headless_list)"} )
+  # Live terminal size, as "lines cols". $LINES/$COLUMNS are fixed when the
+  # shell starts, so after a resize a repainting menu computes a frame taller
+  # than the window — it draws off the bottom and the list looks unscrollable.
+  _err_term_size() {
+    local size="" lines cols
+    size=$(stty size < /dev/tty 2>/dev/null)
+    lines="${size%% *}"
+    cols="${size##* }"
+    [[ "$lines" == <-> ]] || lines=${LINES:-24}
+    [[ "$cols" == <-> ]] || cols=${COLUMNS:-80}
+    (( lines < 8 )) && lines=24
+    (( cols < 40 )) && cols=80
+    print -r -- "$lines $cols"
+  }
+
+  # Pick one row, then translate the label through _ERR_PICK_MAP. The callers
+  # build that map so rows can stay the command a human would type while the
+  # engine gets back the model id.
+  _err_pick_map_pick() {
+    local choice
+    choice=$(_err_pick "$@") || return 1
+    print -r -- "${_ERR_PICK_MAP[$choice]:-$choice}"
+  }
+
+  # Installed models, offered as *commands*: one row = the exact line you
+  # would type. No title row — the rows already name the verb.
+  _err_pick_installed() {  # header (unused), verb (default run), include apple-fm (default 1), exclude
+    local verb="${2:-run}" with_fm="${3:-1}" exclude="${4:-}" id label
+    local -a ids=( ${(f)"$(_err_installed_ids)"} )
     ids=( ${ids:#} )
-    local -a all=( "$_ERR_FM_ID" "${ids[@]}" )
+    # A swap menu must not offer the model that is already serving: picking it
+    # is a no-op that still prints a stop/start dance.
+    if [[ -n "$exclude" ]]; then
+      local -a kept=()
+      for id in "${ids[@]}"; do
+        [[ "$id" == "$exclude" ]] || kept+=( "$id" )
+      done
+      ids=( "${kept[@]}" )
+    fi
+    # `err run` puts the model served last at the top: Enter on the first row is
+    # the common case, and it is usually the model you were just running.
+    if [[ "$verb" == run ]]; then
+      local last; last=$(_err_last_model)
+      if [[ -n "$last" ]] && (( ${ids[(Ie)$last]:-0} )); then
+        local -a reordered=( "$last" )
+        for id in "${ids[@]}"; do
+          [[ "$id" == "$last" ]] || reordered+=( "$id" )
+        done
+        ids=( "${reordered[@]}" )
+      fi
+    fi
+    # The Apple model is a backend, not a repo: last, so the MLX repos a user
+    # actually runs stay in front of it.
+    local -a all=( "${ids[@]}" )
+    (( with_fm )) && [[ "$exclude" != "$_ERR_FM_ID" ]] && all=( "${ids[@]}" "$_ERR_FM_ID" )
+    if (( ! ${#all[@]} )); then
+      if [[ -n "$exclude" ]]; then
+        print -u2 "err: no other model installed — get one with 'err download'"
+      else
+        print -u2 "err: no models installed — try 'err download'"
+      fi
+      return 1
+    fi
     _ERR_PICK_MAP=()
     local -a lines=()
-    if [[ -n "$def" && " ${all[*]} " == *" $def "* ]]; then
-      mark="* "; label="$mark$(_err_row_label "$def")"
-      lines+=( "$label" ); _ERR_PICK_MAP[$label]="$def"
-    fi
     for id in "${all[@]}"; do
-      [[ "$id" == "$def" ]] && continue
-      mark="  "; label="$mark$(_err_row_label "$id")"
-      lines+=( "$label" ); _ERR_PICK_MAP[$label]="$id"
+      label="err $verb $(_err_row_label "$id")"
+      lines+=( "$label" )
+      _ERR_PICK_MAP[$label]="$id"
     done
-    printf '%s\n' "${lines[@]}" | _err_pick "$header  (* = default)"
+    _err_pick_map_pick "${lines[@]}"
   }
 
   # Curated catalog rows this Mac can host, labelled by title.
-  _err_pick_catalog() {
-    local header="${1:-Pick a model to download}"
+  _err_pick_catalog() {  # header (unused)
     local ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
     _ERR_PICK_MAP=()
     local -a lines=()
-    local tier tname title ids tags desc firstid label
-    # Always available, needs no download.
-    lines+=( "  $(_err_row_label "$_ERR_FM_ID")" )
-    label="  $(_err_row_label "$_ERR_FM_ID")"
-    _ERR_PICK_MAP[$label]="$_ERR_FM_ID"
+    local tier tname title ids tags desc firstid label size
     while IFS=$'\x1f' read -r tier tname title ids tags desc; do
       [[ -z "$ids" ]] && continue
       firstid="${ids%% & *}"
-      label="$title  —  $firstid  [$tname]"
+      # Already on disk: a download row would only re-fetch it. The free-text
+      # row below stays, so a model that is not in the curated list is still
+      # reachable.
+      _err_model_present "$firstid" && continue
+      # A size answers "how big is this download?" before you commit to it.
+      size=$(_err_model_size "$firstid")
+      label="err download $firstid${size:+  ($size)}"
       lines+=( "$label" )
       _ERR_PICK_MAP[$label]="$firstid"
     done < <(_err_catalog_rows_for_ram "$ram_gb" "$curated_file")
-    if (( ! ${#lines} )); then
-      gum style --foreground 244 "No curated models for this Mac."
-      return 1
-    fi
-    printf '%s\n' "${lines[@]}" | _err_pick "$header"
+    # Anything not in the catalog: type its repo id, so `err download` never
+    # needs a second invocation with an argument.
+    label="err download Hugging Face ID"
+    lines+=( "$label" )
+    _ERR_PICK_MAP[$label]="__hf_id__"
+    _err_pick_map_pick "${lines[@]}"
   }
 
   # With no model id: keep the default/last one if it is installed, else ask.
-  _err_pick_default_first() {
-    local header="$1" m
+  _err_pick_default_first() {   # header, verb
+    local header="$1" verb="${2:-run}" m
     for m in $(_err_default_model) $(_err_last_model); do
       [[ -z "$m" ]] && continue
       [[ "$m" == "$_ERR_FM_ID" ]] && { print -r -- "$m"; return 0 }
       _err_model_supported "$m" "$hub_dir" && { print -r -- "$m"; return 0 }
     done
-    _err_pick_installed "$header"
+    _err_pick_installed "$header" "$verb"
   }
 
   _err_headless_run() {
     local model="${1:-}"
+    if [[ -z "$model" ]]; then
+      # `err run` with nothing to run is a status question when a model is
+      # already serving: say so instead of opening a picker that would only
+      # offer what is already up (or a different model, which is `err swap`).
+      local rpid rport rcur
+      if [[ -n "$(_err_running_model)" ]]; then
+        read -r rpid rport rcur <<< "$(_err_running_model)"
+        _err_say "$rcur already running"
+        _err_note_last_model "$rcur"
+        return 0
+      fi
+      model=$(_err_pick_installed "err run" run) || return 1
+    fi
+    # After the pick, not before: the Apple model is a backend, not a repo, and
+    # a pick of it must never fall through to a Hugging Face download.
     if [[ "$model" == "$_ERR_FM_ID" ]]; then
       _err_fm_start
       return $?
-    fi
-    if [[ -z "$model" ]]; then
-      model=$(_err_pick_installed "Start which model?") || return 1
     fi
     # Fetch uncached weights before choosing a backend: the streaming-MoE
     # compatibility check reads the cached config.json, so a fresh model has to
@@ -2322,11 +1063,11 @@ PY
       local pid port cur
       read -r pid port cur <<< "$(_err_running_model)"
       if [[ "$cur" == "$model" ]]; then
-        print "err: $model already running on :$port (pid $pid)"
+        _err_say "$model already running"
         _err_note_last_model "$model"
         return 0
       fi
-      print "err: stopping $cur (pid $pid) to switch to $model"
+      _err_status_set "stopping $cur on http://127.0.0.1:$port"
       kill "$pid" 2>/dev/null
       local i
       for i in {1..40}; do
@@ -2340,45 +1081,6 @@ PY
     return $rc
   }
 
-  # err runs [<model>] — an ADDITIONAL server on :11501+:11509, next to
-  # whatever already serves :11500. Never stops or replaces anything.
-  _err_headless_runs() {
-    local model="${1:-}" port
-    if [[ -z "$model" ]]; then
-      model=$(_err_pick_installed "Start which additional model?") || return 1
-    fi
-    if [[ "$model" == "$_ERR_FM_ID" ]]; then
-      # fm is a singleton on its own port; a second copy isn't a thing.
-      print -u2 "err: $model is a single on-device server — use 'err run $_ERR_FM_ID'"
-      return 2
-    fi
-    local pid rport rmodel
-    while IFS=$'\t' read -r pid rport rmodel; do
-      if [[ "$rmodel" == "$model" ]]; then
-        print "err: $model already running on :$rport (pid $pid)"
-        return 0
-      fi
-    done < <(_err_running)
-    for port in {11501..11509}; do
-      _err_port_free "$port" && break
-      port=""
-    done
-    if [[ -z "$port" ]]; then
-      print -u2 "err: ports :11501–:11509 are all busy — err stop something first"
-      return 1
-    fi
-    if _err_model_supported "$model" "$hub_dir" \
-       && [[ ! -d "$hub_dir/models--${model//\//--}/snapshots" ]]; then
-      print -u2 "err: downloading $model first (no local snapshot)…"
-      _err_snapshot_download "$model" || {
-        print -u2 "err: download failed for $model"
-        return 1
-      }
-    fi
-    _err_headless_launch "$model" "$port" || return $?
-    print "  endpoint: http://127.0.0.1:$port/v1   (err itself still uses :11500)"
-    return 0
-  }
 
   _err_headless_stop() {
     local want="${1:-}"
@@ -2387,16 +1089,16 @@ PY
     # err stop --all      -> same as bare `err stop`
     [[ -z "$want" ]] && want="--all"
     if [[ "$want" == "$_ERR_FM_ID" ]]; then
-      _err_fm_stop || print "err: Apple Foundation Model is not running"
+      _err_fm_stop || _err_say "the Apple Foundation Model is not running"
       return 0
     fi
     if [[ "$want" == "--all" ]]; then
       _err_fm_stop >/dev/null 2>&1
       local n=0 pid port model
       while IFS=$'\t' read -r pid port model; do
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && { print "err: stopped $model (:$port)"; (( n++ )); }
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && { _err_say "stopped $model (:$port)"; (( n++ )); }
       done < <(_err_running)
-      (( n == 0 )) && print "err: nothing running"
+      (( n == 0 )) && _err_say "nothing is running"
       return 0
     fi
     if [[ -n "$want" ]]; then
@@ -2428,9 +1130,17 @@ PY
   # model you just switched away from (mlx_model_id reads last-model, and the
   # menus/`err ensure` read default-model).
   _err_headless_switch() {
-    local model="${1:-}"
+    # There is nothing to swap *from* when nothing is running: starting the
+    # first model is `err run`.
+    if [[ -z "$(_err_running_model)" ]]; then
+      _err_say "nothing is running — start one with 'err run <model>'"
+      return 1
+    fi
+    local model="${1:-}" cur="" pid port
+    read -r pid port cur <<< "$(_err_running_model)"
     if [[ -z "$model" ]]; then
-      model=$(_err_pick_installed "Switch to which model?") || return 1
+      # The model that is already serving is not a swap target.
+      model=$(_err_pick_installed "err swap" swap 1 "$cur") || return 1
     fi
     _err_headless_run "$model" || return $?
     print -r -- "$model" > "$state_dir/default-model"
@@ -2440,12 +1150,41 @@ PY
   # Wait until :11500 answers /v1/models. $1 = max seconds (default 600). A
   # model another shell launched keeps loading; this lets a second call wait for
   # it instead of trying to launch a second copy.
+  # True when the server on $1 can answer a chat request, not merely listen.
+  # mlx-vlm serves /v1/models while its startup preload still runs and 503s the
+  # first chat with `model_loading`, so readiness must come from /health's
+  # model_ready. Servers without /health (fm, another OpenAI server) fall back
+  # to plain liveness.
+  _err_server_ready() {
+    local port="$1" body
+    if body=$(curl -fs --max-time 1 "http://127.0.0.1:$port/health" 2>/dev/null); then
+      case "$body" in
+        *'"model_ready":false'*|*'"model_ready": false'*|*'"preload_in_progress":true'*) return 1 ;;
+      esac
+      return 0
+    fi
+    curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$port/v1/models" 2>/dev/null
+  }
+
   _err_wait_health() {
-    local i deadline=$(( ${1:-600} * 2 ))
+    local timeout="${1:-600}" model="${2:-the model}" port="${3:-11500}"
+    local url="http://127.0.0.1:$port" deadline=$(( timeout * 5 ))
+    _err_status_set "loading $model on $url"
+    local spin=0 i
+    if [[ -t 2 ]]; then
+      spin=1
+      _err_spin_tick 1 "loading $model on $url"
+    fi
     for i in {1..$deadline}; do
-      curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:11500/v1/models" 2>/dev/null && return 0
-      sleep 0.5
+      (( spin )) && _err_spin_tick "$i" "loading $model on $url"
+      if _err_server_ready "$port"; then
+        (( spin )) && printf '\r\033[K' >&2
+        _err_say "running: $model on $url"
+        return 0
+      fi
+      sleep 0.2
     done
+    (( spin )) && printf '\r\033[K' >&2
     return 1
   }
 
@@ -2459,7 +1198,7 @@ PY
     local model="${1:-}" pid port cur unsupported
     [[ -z "$model" ]] && model=$(_err_default_model)
     if [[ -z "$model" ]]; then
-      print -u2 "err: no model selected — pick one with: err default <model>"
+      print -u2 "err: no model selected — pick one with: err run <model>"
       return 1
     fi
     # fm's sentinels are not HuggingFace repos. Without this, `ensure system`
@@ -2467,7 +1206,7 @@ PY
     # exact repo-not-found failure the fm/MLX split exists to prevent.
     if [[ "$model" == "$_ERR_FM_ID" || "$model" == (system|pcc) ]]; then
       print -u2 "err: $model is the on-device fm backend, not an MLX model on :11500"
-      print -u2 "err: choose an MLX model with: err default <model>"
+      print -u2 "err: choose an MLX model with: err swap <model>"
       return 1
     fi
     # Validate, and fetch missing weights, BEFORE stopping anything: a bad or
@@ -2490,9 +1229,9 @@ PY
     fi
     if [[ -n "$cur" && "$cur" == "$model" ]]; then
       # Right model, not answering yet: it is still loading. Never kill and
-      # relaunch it — that would restart a several-minute load.
-      print -u2 "err: $model is still loading on :11500 — waiting…"
-      if _err_wait_health 600; then
+      # relaunch it — that would restart a several-minute load. _err_wait_health
+      # prints the same starting/ready line as a fresh launch.
+      if _err_wait_health 600 "$model" 11500; then
         _err_note_last_model "$model"
         return 0
       fi
@@ -2500,7 +1239,7 @@ PY
       return 1
     fi
     if [[ -n "$(_err_running)" ]]; then
-      print -u2 "err: stopping ${cur:-the running model} so :11500 can serve $model"
+      print -u2 "Stopping ${cur:-the running model} so :11500 can serve $model"
       _err_stop_all >/dev/null 2>&1
       local i
       for i in {1..40}; do
@@ -2511,31 +1250,6 @@ PY
     _err_headless_run "$model"
   }
 
-  # err default [model] — remember the model `err run` / `err chat` prefer.
-  _err_headless_default() {
-    local model="${1:-}"
-    if [[ -z "$model" ]]; then
-      model=$(_err_pick_installed "Set which model as default?") || return 1
-    fi
-    # A remote/other OpenAI-compatible server (mlx_model / ERR_MLX_MODEL) has
-    # its own weights; only the local :11500 server needs them on this disk.
-    local remote=""
-    remote="$(_err_conf_get mlx_model)${ERR_MLX_MODEL:-}"
-    if [[ "$model" != "$_ERR_FM_ID" && -z "$remote" \
-          && ! -d "$hub_dir/models--${model//\//--}" ]]; then
-      print -u2 "err: $model isn't downloaded yet — err download $model"
-      return 1
-    fi
-    if [[ "$model" != "$_ERR_FM_ID" && -z "$remote" ]] \
-       && ! _err_model_supported "$model" "$hub_dir"; then
-      print -u2 "err: $model can't be served — pick an MLX-quantized repo"
-      return 1
-    fi
-    print -r -- "$model" > "$state_dir/default-model"
-    print "err: default model = $model"
-    _err_point_backend_at "$model"
-    print "  * marks it in the menus (err run / err switch / err chat)"
-  }
 
   # err remove [model]... — delete weights from disk. Never touches config.
   _err_headless_remove() {
@@ -2545,10 +1259,18 @@ PY
       ids=( ${ids:#} )
       if (( ! ${#ids} )); then print "err: nothing installed"; return 0; fi
       local picked
-      picked=$(printf '%s\n' "${ids[@]}" | gum choose --no-limit \
-        --header "Delete which model(s)?  (space = mark, enter = confirm)") || return 1
+      local id row
+      local -a rows=()
+      _ERR_PICK_MAP=()
+      for id in "${ids[@]}"; do
+        rows+=( "err remove $id" )
+        _ERR_PICK_MAP["err remove $id"]="$id"
+      done
+      picked=$(_err_pick --multi "${rows[@]}") || return 1
       [[ -z "$picked" ]] && return 1
-      want=( ${(f)picked} )
+      for row in ${(f)picked}; do
+        want+=( "${_ERR_PICK_MAP[$row]:-$row}" )
+      done
     fi
 
     # Validate BEFORE asking: confirming a delete for a model that isn't there
@@ -2567,7 +1289,7 @@ PY
 
     print "err: this deletes weights from $hub_dir"
     printf '  %s\n' "${present[@]}"
-    gum confirm "Delete ${#present} model(s) permanently?" || { print "aborted"; return 1; }
+    _err_confirm "Delete ${#present} model(s) permanently?" || { print "aborted"; return 1; }
 
     for model in "${present[@]}"; do
       folder="$hub_dir/models--${model//\//--}"
@@ -2582,16 +1304,6 @@ PY
     return $rc
   }
 
-  # err settings — the same gum menus the TUI uses, without the TUI.
-  _err_headless_settings() {
-    local pick
-    pick=$(printf "Basic settings\nAdvanced settings (edit config.zsh)" \
-      | gum choose --header "err settings") || return 1
-    case "$pick" in
-      Basic*)    _err_basic_settings_menu ;;
-      Advanced*) _err_advanced_settings_menu ;;
-    esac
-  }
 
   # err doctor — one pass/fail line per subsystem. The point is to convert
   # "it doesn't work" into a named failing part, so nobody has to guess whether
@@ -2637,7 +1349,25 @@ PY
       (( problems++ ))
     fi
 
-    # 3. launcher freshness (the shell that called us exported its load time)
+    # 3. the prompts actually in force. A hand-edited prompt is otherwise
+    # invisible: every answer degrades and nothing says why. err.py owns the
+    # precedence (explain_system_prompt -> legacy system_prompt -> builtin), so
+    # ask it rather than re-implementing that in zsh.
+    local pkind p_out p_origin p_text
+    for pkind in explain question; do
+      if p_out=$(python3 "$_ERR_SRC_DIR/err.py" --prompt "$pkind" 2>/dev/null) \
+          && [[ -n "$p_out" ]]; then
+        p_origin="${p_out%%$'\t'*}"; p_text="${p_out#*$'\t'}"
+        (( ${#p_text} > 58 )) && p_text="${p_text[1,58]}…"
+        row ok "prompt-$pkind" "$p_origin — $p_text"
+      else
+        row warn "prompt-$pkind" "could not read the effective prompt" \
+          "python3 $_ERR_SRC_DIR/err.py --prompt $pkind"
+        (( warnings++ ))
+      fi
+    done
+
+    # 4. launcher freshness (the shell that called us exported its load time)
     local lt="${_ERR_LOADED_AT:-}" mt
     mt=$(/usr/bin/stat -f %m "$_ERR_SRC_DIR/err-launcher.zsh" 2>/dev/null)
     if [[ -n "$lt" && -n "$mt" ]] && (( mt > lt )); then
@@ -2647,7 +1377,7 @@ PY
       row ok launcher "current in this shell"
     fi
 
-    # 4. state
+    # 5. state
     if [[ -w "$state_dir" ]]; then
       local ns; ns=$(ls -1 "$state_dir/sessions" 2>/dev/null | wc -l | tr -d ' ')
       row ok state "$state_dir (${ns} session(s))"
@@ -2657,7 +1387,7 @@ PY
     fi
     local def; def=$(_err_default_model)
     if [[ -z "$def" ]]; then
-      row warn default "no default model chosen" "err default"
+      row warn model "no model has been run yet" "err run <model>"
       (( warnings++ ))
     elif [[ "$def" == "$_ERR_FM_ID" ]]; then
       row ok default "apple-fm (on-device)"
@@ -2670,7 +1400,7 @@ PY
       (( problems++ ))
     fi
 
-    # 5. the backend's server
+    # 6. the backend's server
     case "$(_err_effective_backend)" in
       mlx*)
         local base; base=$(_err_conf_get mlx_base_url); base=${base:-http://127.0.0.1:11500}
@@ -2702,19 +1432,19 @@ PY
         ;;
     esac
 
-    # 6. tools the model manager needs
+    # 7. tools the model manager needs
     local -a missing=(); local t
-    for t in gum uv uvx mlx_vlm.server; do
+    for t in uv uvx mlx_vlm.server; do
       command -v "$t" >/dev/null 2>&1 || missing+=( "$t" )
     done
     if (( ${#missing} )); then
       row warn tools "missing: ${missing[*]}" "re-run install.sh"
       (( warnings++ ))
     else
-      row ok tools "gum, uv, uvx, mlx_vlm.server"
+      row ok tools "uv, uvx, mlx_vlm.server"
     fi
 
-    # 7. disk
+    # 8. disk
     local apc_kb cap_gb total_gb
     local apc_dir="${APC_DISK_PATH:-$state_dir/apc}"
     apc_kb=$(du -sk "$apc_dir" 2>/dev/null | awk '{print $1}'); apc_kb=${apc_kb:-0}
@@ -2727,7 +1457,7 @@ PY
       row ok disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)"
     fi
 
-    # 8. leftovers from crashed invocations
+    # 9. leftovers from crashed invocations
     local stale; stale=$(ls -1 "$state_dir"/run/*(N) 2>/dev/null | wc -l | tr -d ' ')
     if (( stale > 50 )); then
       row warn temp "$stale scratch files in $state_dir/run" "rm -f $state_dir/run/*"
@@ -2749,7 +1479,7 @@ PY
   _err_headless_uninstall() {
     print "This stops err's servers and removes its line from ~/.zshrc."
     print "Models, config and logs are NOT deleted (see 'err cache')."
-    gum confirm "Uninstall err?" || { print "aborted"; return 1; }
+    _err_confirm "Uninstall err?" || { print "aborted"; return 1; }
     local pid port model
     while IFS=$'\t' read -r pid port model; do
       [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && print "  ✓ stopped $model (:$port)"
@@ -2769,49 +1499,31 @@ PY
     print "Open a new terminal afterwards."
   }
 
-  _err_headless_status() {
-    local json=0 any=0 fmpid fmport
-    [[ "${1:-}" == "--json" ]] && json=1
-    if (( ! json )); then
-      local be bemodel
-      be=$(_err_effective_backend)
-      bemodel=$(cat "$state_dir/default-model" 2>/dev/null | tr -d '[:space:]')
-      print "err: backend=$be${bemodel:+  default=$bemodel}"
-      fmport=$(_err_fm_port)
-      if fmpid=$(_err_fm_running); then
-        printf '%s\t:%s\tpid %s  (Apple on-device)\n' "$_ERR_FM_ID" "$fmport" "$fmpid"
-        any=1
+
+  # Installed model ids, sorted, byte order pinned: the raw material every
+  # picker and `err list` share. Deliberately *not* the `err list` verb —
+  # that opens a picker on a terminal, so calling it from a picker recurses.
+  # Is this repo's snapshot already on disk? A directory is enough: the hub
+  # only creates `snapshots/` after a successful snapshot_download.
+  _err_model_present() {
+    [[ -n "${1:-}" && -d "$hub_dir/models--${1//\//--}/snapshots" ]]
+  }
+
+  _err_installed_ids() {
+    local all="${1:-0}" m id
+    local -a models=( "$hub_dir"/models--*(N/) ) ids=()
+    for m in "${models[@]}"; do
+      id="${${m:t}#models--}"; id="${id//--//}"
+      # GGUF repos can never be served by mlx-vlm; keep them out of the list
+      # (they stay reachable via `err list --all`).
+      if (( all )) || _err_model_supported "$id" "$hub_dir"; then
+        ids+=( "$id" )
       fi
-    fi
-    if [[ -n "$(_err_running_model)" ]]; then
-      local pid port cur
-      read -r pid port cur <<< "$(_err_running_model)"
-      if (( json )); then
-        # Unchanged shape: pi and other clients parse exactly this.
-        printf '{"model":"%s","port":%s,"pid":%s,"base_url":"http://127.0.0.1:%s/v1"}\n' \
-          "$(_err_json_escape "$cur")" "$port" "$pid" "$port"
-        return 0
-      fi
-      # Human output also lists extra servers started with `err runs`.
-      local ap aq am
-      while IFS=$'\t' read -r ap aq am; do
-        [[ -n "$ap" ]] || continue
-        print "$am\t:$aq\tpid $ap"
-        any=1
-      done < <(_err_running)
-      return 0
-    fi
-    if (( ! json )); then
-      local ep eq em
-      while IFS=$'\t' read -r ep eq em; do
-        [[ -n "$ep" ]] || continue
-        print "$em\t:$eq\tpid $ep"
-        any=1
-      done < <(_err_running)
-    fi
-    if (( json )); then print 'null'; else (( any )) || print "none"; fi
-    (( any )) && return 0
-    return 1
+    done
+    # LC_ALL=C pins byte order so scripts see the same order on any machine
+    # (zsh's (o) flag follows the locale and varies between hosts).
+    (( ${#ids[@]} )) && printf '%s\n' "${ids[@]}" | LC_ALL=C sort
+    return 0
   }
 
   _err_headless_list() {
@@ -2823,115 +1535,334 @@ PY
         *) print -u2 "usage: err list [--json] [--all]"; return 2 ;;
       esac
     done
-    local -a models=( "$hub_dir"/models--*(N/) )
-    local -a ids=()
-    local m id
-    for m in "${models[@]}"; do
-      id="${${m:t}#models--}"; id="${id//--//}"
-      # GGUF repos can never be served by mlx-vlm; keep them out of the list
-      # (they stay reachable via `err list --all`).
-      if (( all )) || _err_model_supported "$id" "$hub_dir"; then
-        ids+=( "$id" )
-      fi
-    done
-    # LC_ALL=C pins byte order so scripts see the same order on any machine
-    # (zsh's (o) flag follows the locale and varies between hosts).
-    local -a sorted=()
-    if (( ${#ids[@]} )); then
-      sorted=( ${(f)"$(printf '%s\n' "${ids[@]}" | LC_ALL=C sort)"} )
-    fi
+    # Always plain data: `err list` is a list. Details, running and swapping are
+    # `err info` / `err run` / `err swap`.
+    local -a ids=( ${(f)"$(_err_installed_ids $all)"} )
+    ids=( ${ids:#} )
     if (( json )); then
       print -n '['
-      local first=1
-      for id in "${sorted[@]}"; do
+      local first=1 id
+      for id in "${ids[@]}"; do
         (( first )) || print -n ','
         first=0
         print -n "\"$(_err_json_escape "$id")\""
       done
       print ']'
     else
-      for id in "${sorted[@]}"; do print -r -- "$id"; done
-    fi
-    return 0
-  }
-
-  _err_headless_info() {
-    local model="${1:-}" json=0
-    [[ "${2:-}" == "--json" ]] && json=1
-    if [[ -z "$model" ]]; then
-      (( json )) && { print -u2 "usage: err info <model-id> [--json]"; return 2; }
-      model=$(_err_pick_installed "Details for which model?") || return 1
-    fi
-    local folder="$hub_dir/models--${model//\//--}"
-    local family spec control markers rf size_kb=0
-    family=$(_err_model_family "$model" "$hub_dir")
-    spec=$(_err_thinking_spec "$model" "$hub_dir")
-    control="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
-    markers="${spec%%$'\t'*}"; rf="${spec#*$'\t'}"
-    # Measure the snapshot tree with symlinks followed: a hub model dir holds
-    # `snapshots/…` links into `blobs/`, so `du` on the dir reports a few MB for
-    # a multi-GB model. Following snapshots counts each weight file once.
-    local size_target="$folder/snapshots"
-    [[ -d "$size_target" ]] || size_target="$folder"
-    [[ -d "$folder" ]] && size_kb=$(du -skL "$size_target" 2>/dev/null | awk '{print $1}')
-    local installed=false
-    [[ -d "$folder" ]] && installed=true
-    if (( json )); then
-      printf '{"model":"%s","installed":%s,"family":"%s","thinking_control":"%s","thinking_markers":"%s","reasoning_first":%s,"path":"%s","size_bytes":%s}\n' \
-        "$(_err_json_escape "$model")" "$installed" "$family" "$control" "$markers" \
-        "$([[ "$rf" == 1 ]] && echo true || echo false)" \
-        "$(_err_json_escape "$folder")" "$(( size_kb * 1024 ))"
-    else
-      print "Model:      $model"
-      print "Installed:  $installed"
-      print "Family:     $family"
-      print "Thinking:   control=$control markers=$markers reasoning-first=$([[ "$rf" == 1 ]] && echo yes || echo no)"
-      print "Path:       $folder"
-      (( size_kb > 0 )) && print "Size:       $(_err_fmt_bytes $(( size_kb * 1024 )) 2>/dev/null)  (weights, symlinks followed)"
-    fi
-    return 0
-  }
-
-  _err_headless_endpoint() {
-    local json=0
-    [[ "$1" == "--json" ]] && json=1
-    local pid port cur
-    if [[ -n "$(_err_running_model)" ]]; then
-      read -r pid port cur <<< "$(_err_running_model)"
-    fi
-    if (( json )); then
-      if [[ -n "$cur" ]]; then
-        printf '{"model":"%s","port":%s,"base_url":"http://127.0.0.1:%s/v1"}\n' \
-          "$(_err_json_escape "$cur")" "$port" "$port"
-        return 0
+      if [[ -t 0 && -t 1 && -t 2 ]] && (( ${#ids[@]} )); then
+        # A look-only picker: one `arr //` cursor that moves up and down, but
+        # Enter/Esc do nothing — the rows are the answer, not a choice. Piped
+        # output stays bare ids, so scripts and --json clients are untouched.
+        _err_pick "${ids[@]}" >/dev/null || true
+      else
+        (( ${#ids[@]} )) && printf '%s\n' "${ids[@]}"
       fi
-      print 'null'
-      return 1
     fi
-    if [[ -n "$cur" ]]; then
-      print "http://127.0.0.1:$port/v1"
-      print "$cur"
+    return 0
+  }
+
+  # Human size of a model's weights, symlinks followed (a hub model dir holds
+  # `snapshots/…` links into `blobs/`, so a plain du under-reports it).
+  _err_model_size() {
+    local folder="$hub_dir/models--${1//\//--}" target kb
+    target="$folder/snapshots"
+    [[ -d "$target" ]] || target="$folder"
+    [[ -d "$target" ]] || return 0
+    kb=$(du -skL "$target" 2>/dev/null | awk '{print $1}')
+    [[ -n "$kb" ]] && _err_fmt_bytes $(( kb * 1024 )) 2>/dev/null
+  }
+
+  # The MLX backend, read off uv's receipt — never by starting python: `err
+  # info` must answer in milliseconds and work offline.
+  _err_backend_label() {
+    local receipt="$(uv tool dir 2>/dev/null)/mlx-vlm/uv-receipt.toml" ver
+    if [[ -r "$receipt" ]]; then
+      ver=$(grep -oE 'mlx-vlm==[0-9][^"]*' "$receipt" 2>/dev/null | head -1)
+      ver="${ver#mlx-vlm==}"
+    fi
+    print -r -- "uv tool mlx-vlm${ver:+ $ver}"
+  }
+
+  # The one block `err info` shows: the three values an OpenAI client needs,
+  # nothing else. The model id is the one thing worth colouring.
+  _err_info_block() {  # model
+    local model="$1" accent="" reset=""
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      accent=$'\e[1;38;5;214m'; reset=$'\e[0m'
+    fi
+    print "Model:    ${accent}${model}${reset}"
+    print "Base URL: http://localhost:11500/v1"
+    print "API key:  none"
+  }
+
+  # ── cleanup ──────────────────────────────────────────────────────
+  # Sizes are measured live: the number IS the reason to run this. Nothing here
+  # can touch model weights — only regenerable state.
+  _err_cleanup_path() {
+    case "$1" in
+      kv-cache) print -r -- "$state_dir/apc" ;;
+      logs)     print -r -- "$log_dir" ;;
+      sessions) print -r -- "$state_dir/sessions" ;;
+      chats)    print -r -- "$chat_dir" ;;
+    esac
+  }
+
+  _err_cleanup_size() {
+    local kind="$1" p
+    if [[ "$kind" == all ]]; then
+      local total=0 k
+      for k in kv-cache logs sessions chats; do
+        p=$(_err_cleanup_path "$k")
+        total=$(( total + $(_err_du_bytes "$p") ))
+      done
+      _err_fmt_bytes "$total"
       return 0
     fi
-    print "no model running on :11500"
-    return 1
+    p=$(_err_cleanup_path "$kind")
+    [[ -e "$p" ]] || { print -r -- "0B"; return 0 }
+    local n; n=$(du -sh "$p" 2>/dev/null | awk '{print $1}')
+    print -r -- "${n:-?}"
   }
 
-  # Download one or more models. Reuses the same loader the TUI download menu
-  # uses, so caching/verification behavior stays identical.
+  _err_headless_cleanup() {
+    local kind choice what
+    if (( $# )); then
+      what="$1"
+      case "$what" in
+        kv-cache|logs|sessions|chats|all) ;;
+        *) print -u2 "usage: err cleanup [kv-cache|logs|sessions|chats|all]"; return 2 ;;
+      esac
+    else
+      local -a rows=()
+      for kind in kv-cache logs sessions chats all; do
+        rows+=( "err cleanup ${(r:10:)kind} $(_err_cleanup_size "$kind")" )
+      done
+      choice=$(_err_pick "${rows[@]}") || return 0
+      [[ -z "$choice" ]] && return 0
+      what="${${choice##*cleanup }%% *}"
+    fi
+    _err_confirm "Clear $what ($(_err_cleanup_size "$what"))?" || return 0
+    if [[ "$what" == all ]]; then
+      # One confirmation, then every regenerable cache in one pass.
+      _err_clean_cmd "$state_dir" "$hub_dir" --apc --force
+      _err_clean_cmd "$state_dir" "$hub_dir" --logs
+      rm -rf "$(_err_cleanup_path sessions)" "$(_err_cleanup_path chats)"
+      return 0
+    fi
+    case "$what" in
+      # A live server holds APC files open: --force is only reachable after
+      # the confirmation above.
+      kv-cache) _err_clean_cmd "$state_dir" "$hub_dir" --apc --force ;;
+      logs)     _err_clean_cmd "$state_dir" "$hub_dir" --logs ;;
+      sessions|chats) rm -rf "$(_err_cleanup_path "$what")" ;;
+    esac
+    return 0
+  }
+
+  # `err config` — the one file, opened in your editor. No submenus.
+  _err_headless_config() {
+    local f; f=$(_err_conf_path)
+    [[ -r "$f" ]] || { print -u2 "err: config not found: $f"; return 1; }
+    # micro/nano before $VISUAL/$EDITOR: the file is short, and vim is a poor
+    # first choice for someone who just wants to change a number.
+    local ed; ed=$(_err_pick_editor)
+    _err_say "$f"
+    # micro offers to recover a stale backup on open, which turns `err config`
+    # into a three-way prompt. Give this invocation a fresh backup dir and no
+    # new backups: the config is short, and the file itself is the source.
+    if [[ "${ed%% *}" == micro ]]; then
+      local bdir rc
+      bdir=$(mktemp -d "${TMPDIR:-/tmp}/err-micro.XXXXXX") || {
+        "${=ed}" "$f"; return $?
+      }
+      "${=ed}" -backup false -backupdir "$bdir" "$f"
+      rc=$?
+      rm -rf "$bdir"
+      return $rc
+    fi
+    "${=ed}" "$f"
+  }
+
+  # ── the menu ──────────────────────────────────────────────────────
+  # The rows are the one definition of what err can do: the picker renders
+  # them, and the non-interactive path prints exactly the same list. A test
+  # (or `err | grep`) therefore sees the menu without a terminal.
+  # One definition of the menu: "<command>|<description>". The picker aligns
+  # the description in a column, the plain path prints the same pairs, and
+  # nothing else knows the verb list.
+  _err_help_specs() {
+    print -r -- "err new|start a fresh session"
+    print -r -- "err resume|resume a session"
+    print -r -- "err run <model>|start a model on port 11500"
+    print -r -- "err swap <model>|swap to another model"
+    print -r -- "err info|what is running, with details"
+    print -r -- "err stop|stop the running model"
+    print -r -- "err list|list installed models"
+    print -r -- "err download <model>|download model(s)"
+    print -r -- "err remove <model>|remove model(s)"
+    print -r -- "err config|edit the config file"
+    print -r -- "err cleanup|clear cached state"
+    print -r -- "err uninstall|remove err"
+    print -r -- "err doctor|check the install"
+  }
+
+  # The part of the menu that is not pickable: the two row types you can only
+  # type. They sit above the cursor's first row (`err new`), so ↑/↓ can never
+  # land on a row that would have to be re-dispatched as a placeholder.
+  _err_help_header() {
+    local ver
+    ver=$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')
+    print -r -- "err // ${ver:-?} // local MLX LLM runner"
+    print -r -- ""
+    print -r -- "Available commands:"
+    printf '       %-22s %s\n' "err 'question'" "ask a question"
+    printf '       %-22s %s\n' "err wtf" "ask to explain or correct your last command"
+  }
+
+  _err_help_rows() {
+    local spec cmd desc
+    _err_help_header
+    print -r -- ""
+    while IFS= read -r spec; do
+      [[ -z "$spec" ]] && continue
+      cmd="${spec%%|*}"; desc="${spec#*|}"
+      printf '       %-22s %s\n' "$cmd" "$desc"
+    done < <(_err_help_specs)
+  }
+
+  # Bare `err` / `err -h`. A pick returns "<verb>\t<rest>" on stdout and the
+  # launcher re-dispatches it through `err`, never `eval`, so the menu cannot
+  # drift from the typed command. Rows that need an argument open a picker
+  # (models) or a text field (the question) instead of a placeholder to edit.
+  # The pick has to leave the engine without owning its stdout: the launcher
+  # passes a file and stdout stays the terminal, so the picker can paint on
+  # stderr while the pick goes to stdout.
+  _menu_emit() {  # line, out-file
+    if [[ -n "${2:-}" ]]; then print -r -- "$1" > "$2"
+    else print -r -- "$1"; fi
+  }
+
+  _err_help_menu() {
+    local out="${1:-}" choice verb rest
+    # No terminal: print the rows, which is what a script (and the tests) must
+    # see (`err | cat` included). A picker that cannot render must never
+    # fall into "ask again".
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      _err_help_rows
+      return 0
+    fi
+    local -A map=()
+    local -a rows=() specs=( ${(f)"$(_err_help_specs)"} )
+    local spec cmd desc
+    for spec in "${specs[@]}"; do
+      cmd="${spec%%|*}"; desc="${spec#*|}"
+      rows+=( "$(printf '%-22s %s' "$cmd" "$desc")" )
+      map[${rows[-1]}]="$cmd"
+    done
+    while true; do
+      # The header carries the version and the typed-only rows; the picker
+      # only ever moves over the selectable ones (first row: `err new`).
+      choice=$(_err_pick --header "$(_err_help_header)" "${rows[@]}") \
+        || return 1
+      [[ -z "$choice" ]] && return 1
+      cmd="${map[$choice]:-}"
+      [[ -z "$cmd" ]] && continue
+      case "$cmd" in
+        "err run <model>"|"err swap <model>"|"err remove <model>")
+          verb="${${cmd#err }%% *}"
+          local pick
+          # apple-fm ships with macOS and cannot be removed; swap never offers
+          # the model that is already serving.
+          local exclude="" running
+          if [[ "$verb" == swap ]]; then
+            running=$(_err_running_model)
+            if [[ -n "$running" ]]; then
+              local rpid rport rcur
+              read -r rpid rport rcur <<< "$running"
+              exclude="$rcur"
+            fi
+          fi
+          pick=$(_err_pick_installed "err $verb" "$verb" \
+            $([[ "$verb" == remove ]] && echo 0 || echo 1) "$exclude") || continue
+          _menu_emit "$verb"$'\t'"$pick" "$out"; return 0 ;;
+        "err download <model>")
+          local pick
+          pick=$(_err_pick_catalog "err download") || continue
+          _menu_emit "download"$'\t'"$pick" "$out"; return 0 ;;
+        *)
+          rest="${cmd#err }"
+          if [[ "$rest" == *' '* ]]; then
+            _menu_emit "${rest%% *}"$'\t'"${rest#* }" "$out"
+          else
+            _menu_emit "$rest"$'\t' "$out"
+          fi
+          return 0 ;;
+      esac
+    done
+  }
+
+  # `err info` — what is serving :11500 right now. Nothing running: offer the
+  # installed models, start the pick, then show the block for it.
+  _err_headless_info() {
+    local json=0 a
+    for a in "$@"; do
+      case "$a" in
+        --json) json=1 ;;
+        *) print -u2 "usage: err info [--json]"; return 2 ;;
+      esac
+    done
+    # Read-only: never starts anything. Nothing running is a valid answer.
+    if [[ -z "$(_err_running_model)" ]]; then
+      (( json )) && { print 'null'; return 1; }
+      _err_say "nothing is running — start one with 'err run <model>'"
+      return 1
+    fi
+    local pid port model
+    read -r pid port model <<< "$(_err_running_model)"
+    if [[ -z "$model" ]]; then
+      (( json )) && print 'null'
+      print -u2 "err: nothing is running on :11500"
+      return 1
+    fi
+    if (( json )); then
+      printf '{"model":"%s","path":"%s","base_url":"http://localhost:11500/v1","backend":"%s"}\n' \
+        "$(_err_json_escape "$model")" \
+        "$(_err_json_escape "$hub_dir/models--${model//\//--}")" \
+        "$(_err_json_escape "$(_err_backend_label)")"
+      return 0
+    fi
+    _err_info_block "$model"
+  }
+
+
+  # Download one or more models. Reuses the shared loader, so
+  # caching/verification behavior stays identical.
   _err_headless_download() {
     local -a want=( "$@" )
     if (( ! ${#want} )); then
       local picked
-      if picked=$(_err_pick_catalog "Download which model(s)?"); then
-        want=( "$picked" )
-      else
-        return 1
-      fi
+      picked=$(_err_pick_catalog "err download") || return 1
+      want=( "$picked" )
     fi
+    # `__hf_id__` is the catalog picker's "type an id" sentinel. It arrives as
+    # an argument too — the help menu re-dispatches its pick as
+    # `err download <value>` — so resolve it here, once, for every entry point.
+    local i id
+    for (( i=1; i<=${#want}; i++ )); do
+      [[ "${want[$i]}" == "__hf_id__" ]] || continue
+      id=$(_err_input 'Hugging Face ID (org/model): ') || return 1
+      [[ -z "$id" ]] && return 1
+      want[$i]="$id"
+    done
     local model rc=0
     set -- "${want[@]}"
     for model in "$@"; do
+      # Never re-download what is already on disk: the picker hides these, and
+      # an explicit id gets the same answer instead of a useless re-fetch.
+      if _err_model_present "$model"; then
+        _err_say "$model already downloaded"
+        continue
+      fi
       print -u2 "err: downloading $model …"
       if _err_snapshot_download "$model"; then
         print -u2 "err: downloaded $model"
@@ -2943,204 +1874,53 @@ PY
     return $rc
   }
 
-  # Full curated catalog (all RAM tiers) — everything the Download menu holds
-  # back by tier, so shell users can see/pick any entry. Rows come from the
-  # shared parser, so this can't drift from the TUI menu. Each entry shows its
-  # title, its tagline, and the model id(s) to copy, with an installed tick.
-  _err_headless_curated() {
-    local json=0
-    [[ "$1" == "--json" ]] && json=1
-    local first=1
-    if (( json )); then
-      print -n '['
-      local tier tname title ids tags desc
-      while IFS=$'\x1f' read -r tier tname title ids tags desc; do
-        (( first )) || print -n ','
-        first=0
-        # ids is ' & '-joined; JSON carries an array of them.
-        local -a dl=( ${(s: & :)ids} ) m
-        local idarr="["
-        local fi=1
-        for m in "${dl[@]}"; do
-          (( fi )) || idarr+=","
-          fi=0
-          idarr+="\"$(_err_json_escape "$m")\""
-        done
-        idarr+="]"
-        printf '{"tier":%s,"title":"%s","models":%s,"tags":"%s","description":"%s"}' \
-          "${tier:-0}" "$(_err_json_escape "$title")" "$idarr" \
-          "$(_err_json_escape "$tags")" "$(_err_json_escape "$desc")"
-      done < <(_err_parse_catalog "$curated_file")
-      print ']'
-      return 0
-    fi
 
-    # ---- Collect rows + measure columns so the table lines up. The source has
-    # no title line: each entry's name IS its model id, with the tagline as the
-    # description. A paired entry lists several ids under one tagline.
-    local -a c_tier=() c_tname=() c_ids=() c_desc=()
-    local tier tname title ids tags desc
-    while IFS=$'\x1f' read -r tier tname title ids tags desc; do
-      c_tier+=( "${tier:-0}" ); c_tname+=( "$tname" ); c_ids+=( "$ids" )
-      c_desc+=( "${desc:-$tags}" )   # tagline, or legacy tags as a fallback
-    done < <(_err_parse_catalog "$curated_file")
+  # ---- CLI mode -------------------------------------------------
+  # ``err <sub> [args]`` runs and exits. Servers started by `run` are
+  # DETACHED — they must survive this shell exiting (the pi model_select hook
+  # relies on it) — so we clear the EXIT trap, never add the pid to
+  # _ERR_SESSION_PIDS, and disown it.
+  # Every setting comes from the one file; loaded here so all the helpers that
+  # read it (and `_err_apply_quick`) are defined.
+  _err_load_config
 
-    local i m w_id=0
-    for (( i=1; i<=${#c_ids[@]}; i++ )); do
-      for m in ${(s: & :)c_ids[$i]}; do
-        (( ${#m} > w_id )) && w_id=${#m}
-      done
-    done
-    local dim=$'\e[2m' pink=$'\e[1;38;5;212m' off=$'\e[0m'
-
-    # ---- Render: a titled header, one line per model id, tagline on the
-    # entry's first id, install tick at the end of the line.
-    printf '%s▌▌ Curated models%s\n' "$pink" "$off"
-    local n_inst=0 n_total=${#c_ids[@]} in_tier=-1
-    local any_inst mark first_id
-    for (( i=1; i<=${#c_ids[@]}; i++ )); do
-      if (( c_tier[i] != in_tier )); then
-        in_tier=${c_tier[$i]}
-        # The header text comes verbatim from the catalog source ("8 GB RAM
-        # Tier Models"), so catalog wording changes show through as-is; only
-        # fall back to a synthesized label when the source had no header.
-        printf '\n%s%s%s\n' "$pink" \
-          "${c_tname[$i]:-${in_tier} GB RAM Tier Models}" "$off"
-      fi
-      any_inst=0
-      first_id=1
-      for m in ${(s: & :)c_ids[$i]}; do
-        mark=""
-        if [[ -d "$hub_dir/models--${m//\//--}" ]]; then
-          mark="  ${dim}✓ installed${off}"
-          any_inst=1
-        fi
-        # The tagline rides along on the entry's first line, aligned after the
-        # whole id column (so pairs stay readable).
-        if (( first_id )) && [[ -n "${c_desc[$i]}" ]]; then
-          printf '  %s   %s%s%s%s\n' "$(_err_pad "$m" "$w_id")" "$dim" "${c_desc[$i]}" "$off" "$mark"
-          first_id=0
-        else
-          printf '  %s%s\n' "$m" "$mark"
-        fi
-      done
-      (( any_inst )) && (( n_inst++ ))
-    done
-    printf '\n%s%d of %d entries installed%s\n' "$dim" "$n_inst" "$n_total" "$off"
+  if (( $# == 0 )); then
+    _err_help_rows
     return 0
-  }
+  fi
 
-  # Foreground launch + chat REPL. The server is session-tracked, so it is
-  # stopped when the REPL exits (unlike `run`, which detaches for agents).
-  _err_headless_chat() {
-    local model="${1:-}"
-    if [[ -z "$model" ]]; then
-      model=$(_err_pick_default_first "Chat with which model?") || return 1
-    fi
-    if [[ "$model" == "$_ERR_FM_ID" ]]; then
-      local fmport; fmport=$(_err_fm_port)
-      _err_fm_start || return 1
-      _err_chat_repl "$_ERR_FM_ID" "$fmport"
-      return $?
-    fi
-    local pid port cur
-    if [[ -n "$(_err_running_model)" ]]; then
-      read -r pid port cur <<< "$(_err_running_model)"
-      if [[ "$cur" != "$model" ]]; then
-        print -u2 "err: stopping $cur (pid $pid) to switch to $model"
-        kill "$pid" 2>/dev/null
-        local i
-        for i in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-      fi
-    fi
-    if [[ -n "$(_err_running_model)" ]]; then
-      read -r pid port cur <<< "$(_err_running_model)"
-      _err_chat_repl "$model" "$port"
-      return $?
-    fi
-    _err_launch "$model" || return 1
-    _err_chat_repl "$model" "$_ERR_LAST_LAUNCH_PORT"
-    return $?
-  }
-
-  # `err tui` / `err menu` is the no-verb path (the TUI); the launcher already
-  # routes it that way, this keeps a bare `zsh err-models.zsh tui` working too.
-  [[ "${1:-}" == (tui|menu) ]] && shift
-
-  # ---- CLI (non-interactive) mode -------------------------------
-  # ``err <sub> [args]`` runs and exits without the TUI. Servers started by
-  # `run` are DETACHED — they must survive this shell exiting (the pi
-  # model_select hook relies on it) — so we clear the EXIT trap, never add the
-  # pid to _ERR_SESSION_PIDS, and disown it. `chat` and the TUI instead keep
-  # their server session-tracked so it dies with them.
-  if (( $# > 0 )); then
-    local _sub="$1"; shift
-    # `chat` and TUI keep the EXIT trap; the management verbs don't need it.
-    [[ "$_sub" == chat ]] || trap - EXIT INT TERM HUP
-    case "$_sub" in
+  local _sub="$1"; shift
+  trap - EXIT INT TERM HUP
+  case "$_sub" in
       run|serve)  _err_headless_run      "$@" ;;
-      runs)       _err_headless_runs     "$@" ;;
-      chat)       _err_headless_chat     "$@" ;;
       switch|swap) _err_headless_switch  "$@" ;;
       # Hidden: err.py's autostart path (see _err_headless_ensure). Not in
       # _err_usage, not in the launcher's verb list, not for humans.
       ensure)     _err_headless_ensure   "$@" ;;
-      default|set-default) _err_headless_default "$@" ;;
       remove|rm)  _err_headless_remove   "$@" ;;
-      settings|config) _err_headless_settings "$@" ;;
+      config)     _err_headless_config   "$@" ;;
       uninstall)  _err_headless_uninstall "$@" ;;
       doctor)     _err_headless_doctor    "$@" ;;
       stop)       _err_headless_stop     "$@" ;;
-      status)     _err_headless_status   "$@" ;;
       list|ls)    _err_headless_list     "$@" ;;
       info)       _err_headless_info     "$@" ;;
-      endpoint)   _err_headless_endpoint "$@" ;;
       download)   _err_headless_download "$@" ;;
-      curated|curator) _err_headless_curated "$@" ;;
       version)    print "$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')" ;;
-      help|-h|--help) _err_usage ;;
-      *) print -u2 "err: unknown command '$_sub'"; print -u2 ""; _err_usage >&2; return 2 ;;
-    esac
-    return
-  fi
-
-  _err_check_update "$@"
-
-  # Farewell shown on the NORMAL screen after the TUI exits, so the shell gets
-  # its scrollback back and a one-line summary is left behind (rather than the
-  # leftover err banner).
-  _err_bye() {
-    _err_tui_leave
-    print -n -- $'\e[2J\e[H'   # fresh screen: the sign-off sits at the very top
-    local msg="▌▌ err says bye!"
-    (( ${_ERR_BYE_STOPPED:-0} > 0 )) && msg+="  (stopped ${_ERR_BYE_STOPPED} running model(s))"
-    (( ${_ERR_BYE_LEFT_RUNNING:-0} )) && msg+="  (models still running — 'err stop --all' to stop them)"
-    gum style --foreground 212 --bold "$msg"
-  }
-
-  _err_tui_enter
-  echo
-  _err_main_header
-  if ! _err_hf_has_token; then
-    gum style --foreground 244 "HF Hub: unauthenticated — downloads still work but are slower. Offer a token at the first download."
-  fi
-  while true; do
-    _err_main_standard
-    (( _ERR_MENU_QUIT )) && break
-  done
-  _err_bye
+      cleanup)    _err_headless_cleanup "$@" ;;
+      # Hidden: the launcher's bare `err` / `-h` entry point.
+      helpmenu)   _err_help_menu        "$@" ;;
+      -h|--help)  _err_help_menu ;;
+      *) print -u2 "err: unknown command '$_sub'"; print -u2 "     run 'err' to see the menu"; return 2 ;;
+  esac
+  return
 }
 
 _err_cleanup() {
-  [[ -n "$_ERR_TMP_CFG" && -f "$_ERR_TMP_CFG" ]] && rm -f "$_ERR_TMP_CFG"
   local pid
   for pid in "${_ERR_SESSION_PIDS[@]}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
   done
   [[ -n "$_ERR_STTY_SAVED" ]] && stty "$_ERR_STTY_SAVED" 2>/dev/null
-  # Always give the terminal back: never leave the user on the alternate screen
-  # (also covers Ctrl-C / kill).
-  _err_tui_leave
 }
 trap _err_cleanup EXIT INT TERM HUP
 

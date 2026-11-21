@@ -22,10 +22,14 @@ export ERR_STATE_DIR
 if [[ ! -e "$ERR_STATE_DIR" && -d "$HOME/.cache/marv/mlx" ]]; then
   (
     mkdir -p "$ERR_STATE_DIR" 2>/dev/null
-    for _p in config.zsh chats sessions curated-llms.md default-model last-model; do
+    for _p in config.zsh chats sessions default-model last-model; do
       [[ -e "$HOME/.cache/marv/mlx/$_p" ]] && \
         cp -R "$HOME/.cache/marv/mlx/$_p" "$ERR_STATE_DIR/$_p" 2>/dev/null
     done
+    # The catalog is err-curator.md now; marv's copy still carries the old name,
+    # so it lands under the new one or the first sync would ignore it.
+    [[ -e "$HOME/.cache/marv/mlx/curated-llms.md" ]] && \
+      cp -R "$HOME/.cache/marv/mlx/curated-llms.md" "$ERR_STATE_DIR/err-curator.md" 2>/dev/null
   )
 fi
 
@@ -50,11 +54,14 @@ _ERR_RUN_DIR="${ERR_STATE_DIR}/run"
 mkdir -p "$_ERR_RUN_DIR" 2>/dev/null
 _ERR_SESSION_FILE="${_ERR_RUN_DIR}/session.$$"
 _ERR_TOKENS_FILE="${_ERR_RUN_DIR}/tokens.$$"
+_ERR_TURNS_FILE="${_ERR_RUN_DIR}/turns.$$"
 _ERR_SUGGEST_FILE="${_ERR_RUN_DIR}/suggest.$$"
 _ERR_STDERR_FILE="${_ERR_RUN_DIR}/stderr.$$"
+_ERR_STDOUT_FILE="${_ERR_RUN_DIR}/stdout.$$"
 : > "$_ERR_SESSION_FILE"
 : > "$_ERR_TOKENS_FILE"
-rm -f "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" 2>/dev/null
+: > "$_ERR_TURNS_FILE"
+rm -f "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" "$_ERR_STDOUT_FILE" 2>/dev/null
 
 # Scratch files are named after the owning shell's pid. Reap the ones whose
 # shell is gone — nothing else ever deletes them, and a laptop that opens a few
@@ -73,17 +80,19 @@ _err_reap_scratch
 # Remove this shell's own scratch files on exit (zshexit hook, not a custom
 # `zshexit` function, so a user override is never clobbered).
 _err_cleanup_scratch() {
-  rm -f "$_ERR_SESSION_FILE" "$_ERR_TOKENS_FILE" "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" 2>/dev/null
+  rm -f "$_ERR_SESSION_FILE" "$_ERR_TOKENS_FILE" "$_ERR_TURNS_FILE" "$_ERR_SUGGEST_FILE" "$_ERR_STDERR_FILE" "$_ERR_STDOUT_FILE" 2>/dev/null
 }
 if [[ -n "${ZSH_VERSION:-}" ]]; then
   autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook zshexit _err_cleanup_scratch
 fi
 
 # Turn / token facts for RPROMPT. Updated after every err call, so the prompt
-# costs no fork (a per-prompt command substitution would).
-typeset -g _ERR_TURNS=0
-typeset -g _ERR_TOKENS=0
-typeset -g _ERR_RPROMPT_OWNED=0
+# costs no fork (a per-prompt command substitution would). Preserved across a
+# re-source: resetting them to 0 while the prompt still shows the old counts is
+# how the counter used to freeze.
+typeset -g _ERR_TURNS="${_ERR_TURNS:-0}"
+typeset -g _ERR_TOKENS="${_ERR_TOKENS:-0}"
+typeset -g _ERR_RPROMPT_OWNED="${_ERR_RPROMPT_OWNED:-0}"
 
 # When this shell loaded the launcher. Used to spot a stale in-memory `err`
 # after the file changed on disk — `switch`/`help` live here, so a stale copy
@@ -98,15 +107,18 @@ _err_version() {
   local src="$_ERR_DIR/err-launcher.zsh" mtime
   mtime=$(/usr/bin/stat -f %m "$src" 2>/dev/null)
   if [[ -n "$mtime" ]] && (( mtime > _ERR_LOADED_AT )); then
-    print -u2 "err: ⚠ err-launcher.zsh changed on disk after this shell loaded it"
+    print -u2 "err: warning: err-launcher.zsh changed on disk after this shell loaded it"
     print -u2 "     this shell runs stale code for dispatch/help — run: reload"
   fi
 }
 
 _err_update_rprompt() {
-  # Never clobber a prompt the user already set up; only own an empty RPROMPT.
+  # Never clobber a prompt the user set up; only own an empty RPROMPT. The
+  # exception is err's own previous value: after a re-source both flags are
+  # back at 0 while the screen still shows `2t 207`, so recognize that exact
+  # shape and take the prompt back (otherwise it freezes forever).
   if (( ! _ERR_RPROMPT_OWNED )) && [[ -n "${RPROMPT:-}" ]]; then
-    return
+    [[ "$RPROMPT" == '%F{240}'<->t' '*%f ]] || return
   fi
   _ERR_RPROMPT_OWNED=1
   if (( _ERR_TURNS > 0 )); then
@@ -118,49 +130,35 @@ _err_update_rprompt() {
   fi
 }
 
-_err_help() {
-  cat <<'USAGE'
-
-err v0.601.0 // in-terminal LLM & local MLX model runner
-TO ERR IS HUMAN.
-
-  err what | why             correct/explain the last command
-  err "<question>"           ask a command-related or any other question
-  err new                    start a fresh session (old one stays resumable)
-  err clear | -c             clear the current session, keep the id
-  err resume [n]             list sessions, or resume session number n
-  err delete                 delete all sessions
-  err status                 show what is running
-  err chat <model>           start a model and open the built-in interactive chat
-  err switch | swap <model>  switch to another model
-  err default <model>        set model as default
-  err run <model>            start a model on port 11500
-  err runs <model>           start an extra model on :11501+ (keeps :11500)
-  err stop <model>           stop a running model (default: all)
-  err tui                    interactive TUI (browse / run / download)
-  err list                   list installed models err can serve
-  err curated                show the full curated model catalog
-  err download <model>       download model(s) from the HuggingFace Hub
-  err remove <model>         delete model(s) from the disk
-  err settings               basic and advanced model settings
-  err info <model>           show details for a model (size, family, thinking)
-  err cache                  show on-disk footprint (APC, logs, hub, tool env)
-  err clean --apc|--logs|--venvs|--all
-                             delete regenerable caches (never model weights)
-  err uninstall              remove err from your system
-  err endpoint               print the base URL / model of the running server
-  err doctor                 check the install: config, backends, server, disk
-  err version | -v           show the current version
-  err help | -h              show this help (this is also what bare `err` does)
-
-The first word decides the path: the verbs above always win, so a question that
-starts with one of them needs quoting. `what` / `why` explain the last command
-only when they are the whole command — `err why did that fail` is a question.
-err never runs a model-suggested command. It appends it to your shell history,
-so ↑ recalls it and you decide what to do with it — `suggest = ask` in err.conf
-puts it in the prompt buffer instead, `suggest = off` stops offering it.
-
-USAGE
+# Bare `err` / `err -h` is the interactive menu. The engine owns the rows and
+# the pickers (it already knows the models, the config and the running server);
+# it hands back one chosen line and this dispatches it by name. Never `eval`: a
+# row can only ever be one of err's own verbs, and the menu cannot drift from
+# what typing the same command does.
+_err_help_interactive() {
+  # The pick cannot come back through `$( )`: that makes stdout a pipe, and the
+  # engine would print the rows instead of opening the picker. So it writes the
+  # chosen line to a per-invocation scratch file and stdout stays the terminal.
+  local dir="${ERR_STATE_DIR:-$HOME/.cache/err}/run"
+  mkdir -p "$dir" 2>/dev/null
+  local out="$dir/helpmenu.$$"
+  : >| "$out" 2>/dev/null
+  _err_engine helpmenu "$out"
+  local rc=$? pick=""
+  [[ -r "$out" ]] && pick=$(<"$out")
+  rm -f "$out" 2>/dev/null
+  (( rc == 0 )) || return 0     # esc, or no menu to show: a clean no-op
+  [[ -z "$pick" ]] && return 0  # the rows were printed; that was the answer
+  local verb="${pick%%$'\t'*}"
+  local rest="${pick#*$'\t'}"
+  [[ "$rest" == "$pick" ]] && rest=""
+  if [[ "$verb" == ask ]]; then
+    err "$rest"
+  elif [[ -n "$rest" ]]; then
+    err "$verb" "$rest"
+  else
+    err "$verb"
+  fi
 }
 
 # ── engine bridge ─────────────────────────────────────────────────────
@@ -168,9 +166,9 @@ USAGE
 # Verbs served by the ported marv-mlx engine.
 _err_engine_verbs=(
   # model manager (every `case` arm in err-models.zsh that a user can type)
-  chat switch swap default run runs serve stop status doctor tui menu
-  list ls curated curator download remove rm settings config
-  info cache clean uninstall ensure endpoint set-default
+  swap switch run serve stop doctor
+  list ls download remove rm config info cleanup
+  uninstall ensure
 )
 
 _err_engine() {
@@ -197,8 +195,11 @@ _err_py() {
   _ERR_SESSION_ID="$_ERR_SESSION_ID" \
   _ERR_SESSION_ID_FILE="$_ERR_SESSION_FILE" \
   _ERR_TOKENS_FILE="$_ERR_TOKENS_FILE" \
+  _ERR_TURNS_FILE="$_ERR_TURNS_FILE" \
   _ERR_SUGGEST_FILE="$_ERR_SUGGEST_FILE" \
   _ERR_STDERR_FILE="$_ERR_STDERR_FILE" \
+  _ERR_STDOUT_FILE="$_ERR_STDOUT_FILE" \
+  _ERR_STDIN_PIPED="${_err_stdin_piped:-0}" \
     "$py" "$_ERR_DIR/err.py" "$@"
   local rc=$?
 
@@ -207,10 +208,14 @@ _err_py() {
   newid="$(<"$_ERR_SESSION_FILE" 2>/dev/null | head -1 | tr -d '[:space:]')"
   [[ -n "$newid" && "$newid" != "$_ERR_SESSION_ID" ]] && _ERR_SESSION_ID="$newid"
 
-  # Token total for the prompt.
+  # Token/turn total for the prompt: err.py publishes the current session's
+  # counters, so `new` resets them and `resume` adopts the resumed session's.
   local tok
   tok="$(<"$_ERR_TOKENS_FILE" 2>/dev/null | head -1 | tr -dc '0-9')"
   [[ -n "$tok" ]] && _ERR_TOKENS="$tok"
+  local turns
+  turns="$(<"$_ERR_TURNS_FILE" 2>/dev/null | head -1 | tr -dc '0-9')"
+  [[ -n "$turns" ]] && _ERR_TURNS="$turns"
 
   _err_take_suggestion
   return $rc
@@ -259,6 +264,8 @@ _err_last_cmd=""
 _err_last_exit=0
 _err_skip_exit=0     # set while err itself runs, so its $? can't clobber ours
 _err_consumed=0      # set once explained, so a second `err` doesn't repeat it
+_err_fresh=0         # 1 while the last command has not been talked about yet
+_err_stdin_piped=0   # 1 when the pending command line ends in `| err …`
 
 # Is this command line one of ours? `err` is aliased to `noglob err`, so the
 # line preexec sees carries that prefix — matching only "err" would let an err
@@ -266,16 +273,37 @@ _err_consumed=0      # set once explained, so a second `err` doesn't repeat it
 _err_is_ours() {
   local c="$1"
   c="${c#noglob }"
-  [[ "$c" == (err|errc|err\ *|errc\ *) ]]
+  [[ "$c" == (err|err\ *) ]]
 }
 
 _err_preexec() {
+  # Reset first: a stale flag (or a stale pipe) must never describe this line.
+  _err_stdin_piped=0
   # $1 is empty when zsh runs the hook outside an interactive command line
   # (scripts, some plugin managers) — never let that wipe the real record.
   [[ -z "${1:-}" ]] && return
   _err_is_ours "$1" && return
-  _err_last_cmd="$1"
+  local c="$1"
+  # `ps aux | err wtf`: err is the LAST stage, not the first, so _err_is_ours
+  # misses it and the whole pipeline would become "the command". Record the
+  # producing side instead, and remember that err's stdin is that pipe —
+  # err.py reads it rather than explaining a command it never saw.
+  if [[ "$c" == *"|"* ]]; then
+    local tail="${c##*|}"
+    tail="${tail#"${tail%%[^[:space:]]*}"}"
+    if _err_is_ours "$tail"; then
+      c="${c%|*}"
+      c="${c%"${c##*[^[:space:]]}"}"
+      _err_stdin_piped=1
+    fi
+  fi
+  _err_last_cmd="$c"
   _err_consumed=0
+  _err_fresh=1
+  # Nothing is captured for a plain command, so an earlier capture must
+  # not be read as if it belonged to this one.
+  : >| "$_ERR_STDOUT_FILE" 2>/dev/null
+  : >| "$_ERR_STDERR_FILE" 2>/dev/null
 }
 
 _err_precmd() {
@@ -313,14 +341,18 @@ unalias err 2>/dev/null || true
 err() {
   local last_cmd="$_err_last_cmd"
   local last_exit="$_err_last_exit"
+  # Snapshot before anything can consume it: the ask path uses it as context,
+  # and *any* err call means the command is no longer "the one just run".
+  local fresh=$_err_fresh
+  _err_fresh=0
   _err_skip_exit=1
 
   local verb="${1:-}"
 
-  # ---- no arguments: this is the help screen now ----
+  # ---- no arguments: the interactive menu ----
   if (( $# == 0 )); then
-    _err_help
-    return 0
+    _err_help_interactive
+    return $?
   fi
 
   # ---- model manager verbs (win over free text) ----
@@ -328,33 +360,35 @@ err() {
   for v in "${_err_engine_verbs[@]}"; do
     if [[ "$verb" == "$v" ]]; then
       _err_engine "$@"
-      return $?
+      local rc=$?
+      # `err stop` ends the conversation too: the model is gone, so the next
+      # start gets a fresh session (and a cleared turn/token counter).
+      if [[ "$v" == stop && $rc -eq 0 ]]; then
+        _err_py --reset-session >/dev/null 2>&1
+        _err_update_rprompt
+      fi
+      return $rc
     fi
   done
   case "$verb" in
     version|-v|-V|--version) _err_version; return 0 ;;
-    help|-h|--help)       _err_help;    return 0 ;;
+    -h|--help)            _err_help_interactive; return $? ;;
   esac
 
   # ---- session verbs ----
   case "$verb" in
-    new|clear|-c|resume|delete)
+    new|resume)
       _err_py "$@"
       local rc=$?
-      case "$verb" in
-        new)  _ERR_TURNS=0; _ERR_TOKENS=0 ;;
-        clear|-c) _ERR_TURNS=0; _ERR_TOKENS=0 ;;
-        resume) _ERR_TURNS=1 ;;   # resumed sessions start non-empty
-      esac
       _err_update_rprompt
       return $rc
       ;;
   esac
 
-  # ---- explain the last command: `err what` / `err why` / `err wtf` ----
-  # Only when the word stands alone; `err why did it fail` stays a question.
+  # ---- explain the last command: `err wtf` ----
+  # Only when the word stands alone; `err wtf did that fail` stays a question.
   case "$verb" in
-    what|why|wtf)
+    wtf)
       if (( $# == 1 )); then
         _err_explain "$last_cmd" "$last_exit"
         return $?
@@ -363,17 +397,20 @@ err() {
   esac
 
   # ---- ask a question ----
+  # A pipeline ending in `| err <question>` hands err the producer's OUTPUT,
+  # never its exit status — don't present a stale $? as this command's.
+  [[ ${_err_stdin_piped:-0} == 1 ]] && last_exit=-1
   _ERR_LAST_CMD="$last_cmd"
   _ERR_LAST_EXIT="$last_exit"
-  export _ERR_LAST_CMD _ERR_LAST_EXIT
+  _ERR_LAST_FRESH="$fresh"
+  export _ERR_LAST_CMD _ERR_LAST_EXIT _ERR_LAST_FRESH
   _err_py --ask "$@"
   local rc=$?
-  (( rc == 0 )) && { (( _ERR_TURNS++ )); _err_update_rprompt; }
+  (( rc == 0 )) && _err_update_rprompt
   return $rc
 }
 
-# Explain the last command. Extracted because `err what|why|wtf` AND `errc` both
-# need it, and bare `err` is the help screen now.
+# Explain the last command (`err wtf`), and the pipe target (`cmd | err wtf`).
 _err_explain() {
   local last_cmd="$1"
   local last_exit="$2"
@@ -394,39 +431,26 @@ _err_explain() {
   fi
 
   if [[ -z "$last_cmd" ]]; then
-    print "🤔 No command to explain." >&2
+    print "err: no command to explain." >&2
     return 1
   fi
 
   # Consume the record so a second `err what` doesn't repeat it.
   _err_last_cmd=""
   _err_consumed=1
+  _err_fresh=0
+
+  # `ps aux | err wtf` was handed the producer's output, not its status: the
+  # exit code err could read here belongs to an earlier command line.
+  (( ${_err_stdin_piped:-0} )) && last_exit=-1
 
   _ERR_LAST_CMD="$last_cmd"
   _ERR_LAST_EXIT="$last_exit"
-  export _ERR_LAST_CMD _ERR_LAST_EXIT
+  _ERR_LAST_FRESH=0
+  export _ERR_LAST_CMD _ERR_LAST_EXIT _ERR_LAST_FRESH
   _err_py
   local rc=$?
-  (( rc == 0 )) && { (( _ERR_TURNS++ )); _err_update_rprompt; }
-  return $rc
-}
-
-# Run a command, capture its stderr, then explain it. Deliberately NOT
-# noglob-aliased: errc runs real commands, so its globs must expand.
-errc() {
-  "$@" 2> >(tee "$_ERR_STDERR_FILE" >&2)
-  local rc=$?
-  # The tee is a separate process: for a fast failure it can still be flushing
-  # when err.py opens the file, which turns "Error output: …" into "none".
-  if (( rc != 0 )) && [[ ! -s "$_ERR_STDERR_FILE" ]]; then
-    local _i
-    for _i in {1..30}; do [[ -s "$_ERR_STDERR_FILE" ]] && break; sleep 0.01; done
-  fi
-  _err_last_exit=$rc
-  _err_last_cmd="$*"
-  _err_skip_exit=1
-  _err_explain "$_err_last_cmd" "$_err_last_exit"
-  _err_skip_exit=1
+  (( rc == 0 )) && _err_update_rprompt
   return $rc
 }
 

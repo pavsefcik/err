@@ -5,10 +5,9 @@
 #   sh install.sh
 #
 # No Xcode Command Line Tools, no Homebrew, no compiler. It installs the tools
-# err needs the brew-free way: uv from Astral's standalone installer, gum from
-# its signed-off GitHub release binary (sha256 checked), and mlx-vlm as a uv
-# tool. Anything already present on PATH (uv, gum, mlx_vlm.server) is reused,
-# never reinstalled.
+# err needs the brew-free way: uv from Astral's standalone installer and
+# mlx-vlm as a uv tool. Anything already present on PATH (uv, mlx_vlm.server)
+# is reused, never reinstalled.
 #
 # Safe to re-run: every step skips what is already present, and the ~/.zshrc
 # wiring is idempotent (it never appends a second launcher source or a second
@@ -71,7 +70,7 @@ done
 export ERR_DRY_RUN ERR_NO_ZSH
 
 # ---- PATH helpers ------------------------------------------------------------
-# uv and gum both land in the user's bin dir (no brew involved). Put it on PATH
+# uv's shims land in the user's bin dir (no brew involved). Put it on PATH
 # for the rest of this script, and later for the user's shells.
 LOCAL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 path_add() {
@@ -108,8 +107,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) \
 repo_dir="$script_dir"
 
 # ---- 1. Hardware preflight ---------------------------------------------------
-# MLX is Apple-Silicon-only and the gum release binary below is Darwin/arm64.
-# Fail here, early, instead of halfway through a tool install.
+# MLX is Apple-Silicon-only. Fail here, early, instead of halfway through a
+# tool install.
 step "Checking hardware (Apple Silicon / macOS 26+)…"
 if [ "${ERR_SKIP_HARDWARE_CHECK:-0}" = "1" ]; then
   says "skipped (ERR_SKIP_HARDWARE_CHECK=1)"
@@ -198,58 +197,7 @@ UV_TOOL_BIN="$(uv tool dir --bin 2>/dev/null || printf '%s/.local/bin' "$HOME")"
 [ -n "$UV_TOOL_BIN" ] || UV_TOOL_BIN="$LOCAL_BIN"
 path_add "$UV_TOOL_BIN"
 
-# ---- 4. gum (release binary + sha256; reused when already present) -----------
-# gum is what the TUI and prompts are built out of, and it is a standalone Go
-# binary — there is no reason to drag Homebrew (and Xcode CLT) in for it.
-GUM_VERSION="2.0.2"
-GUM_SHA256="4777a69b1170b8db23c95d5889fb32186cfda1a3ac950d339aa17e3513633890"
-
-gum_release_install() {
-  _url="https://github.com/charmbracelet/gum/releases/download/v$GUM_VERSION/gum_${GUM_VERSION}_Darwin_arm64.tar.gz"
-  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/err-gum.XXXXXX")" || return 1
-  if ! curl -fsSL "$_url" -o "$_tmp/gum.tar.gz"; then
-    rm -rf "$_tmp"; return 1
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    _got="$(shasum -a 256 "$_tmp/gum.tar.gz" | awk '{print $1}')"
-  else
-    _got="$(sha256sum "$_tmp/gum.tar.gz" | awk '{print $1}')"
-  fi
-  if [ "$_got" != "$GUM_SHA256" ]; then
-    rm -rf "$_tmp"
-    die "gum checksum mismatch (got $_got, want $GUM_SHA256) — refusing to install."
-  fi
-  if ! tar -xzf "$_tmp/gum.tar.gz" -C "$_tmp"; then
-    rm -rf "$_tmp"; return 1
-  fi
-  _bin="$(find "$_tmp" -type f -name gum 2>/dev/null | head -n 1)"
-  if [ -z "$_bin" ]; then
-    rm -rf "$_tmp"; return 1
-  fi
-  mkdir -p "$LOCAL_BIN" || { rm -rf "$_tmp"; return 1; }
-  if ! cp -f "$_bin" "$LOCAL_BIN/gum"; then
-    rm -rf "$_tmp"; return 1
-  fi
-  chmod 755 "$LOCAL_BIN/gum"
-  rm -rf "$_tmp"
-  return 0
-}
-
-step "Installing gum…"
-if command -v gum >/dev/null 2>&1; then
-  says "present ($(gum --version 2>/dev/null | head -n 1))"
-elif [ "${ERR_DRY_RUN:-0}" = "1" ]; then
-  says "[dry-run] download gum $GUM_VERSION (Darwin/arm64, sha256 verified) -> $LOCAL_BIN/gum"
-else
-  gum_release_install || die \
-    "could not download the gum release binary — check your network and re-run (or install gum yourself and re-run)."
-  says "installed $GUM_VERSION -> $LOCAL_BIN/gum (sha256 verified)"
-  path_add "$LOCAL_BIN"
-  command -v gum >/dev/null 2>&1 || die \
-    "gum is not on PATH after install (expected at $LOCAL_BIN/gum) — open a new terminal and re-run."
-fi
-
-# ---- 5. mlx-vlm as a uv tool (only when missing) -----------------------------
+# ---- 4. mlx-vlm as a uv tool (only when missing) -----------------------------
 # err launches `mlx_vlm.server` for every model; `--with jinja2` supplies the
 # chat templates the server needs. Never reinstall an existing tool env — that
 # is how the self-healing startup path is designed to behave.
@@ -272,7 +220,7 @@ else
   says "installed mlx-vlm (with jinja2)"
 fi
 
-# ---- 6. Make sure uv's tool bin dir is on PATH -------------------------------
+# ---- 5. Make sure uv's tool bin dir is on PATH -------------------------------
 step "Checking PATH…"
 if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
   says "[dry-run] ensure $UV_TOOL_BIN and $LOCAL_BIN are on PATH"
@@ -282,7 +230,7 @@ else
   die "mlx_vlm.server is not on PATH (uv tool dir --bin = $UV_TOOL_BIN) — open a new terminal and re-run."
 fi
 
-# Write one guarded line per dir so new shells see uv, gum and the tool shims.
+# Write one guarded line per dir so new shells see uv and the tool shims.
 # uv's own installer is told not to touch shell rc files, so this is the only
 # writer. Idempotent: a dir already mentioned in ~/.zshrc is left alone.
 wire_zsh_path() {
@@ -307,7 +255,7 @@ if [ "$UV_TOOL_BIN" != "$LOCAL_BIN" ]; then
   wire_zsh_path "$UV_TOOL_BIN"
 fi
 
-# ---- 7. Wire the launcher into ~/.zshrc (idempotent) -------------------------
+# ---- 6. Wire the launcher into ~/.zshrc (idempotent) -------------------------
 # The marker line makes the block findable; the source-line grep also catches a
 # launcher wired by the older install.command, so the source is never added
 # twice. The block is printed before it is appended.
@@ -331,13 +279,13 @@ else
   says "appended launcher source to ~/.zshrc"
 fi
 
-# ---- 8. Final verification ---------------------------------------------------
+# ---- 7. Final verification ---------------------------------------------------
 step "Verifying…"
 if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
   says "[dry-run] nothing installed, nothing to verify"
 else
   _ok=1
-  for _c in uv gum mlx_vlm.server; do
+  for _c in uv mlx_vlm.server; do
     if ! command -v "$_c" >/dev/null 2>&1; then
       says "MISSING: $_c"
       _ok=0
@@ -347,7 +295,7 @@ else
   says "all tools present ✓"
 fi
 
-# ---- 9. Next steps -----------------------------------------------------------
+# ---- 8. Next steps -----------------------------------------------------------
 step "Done. err is installed in $repo_dir"
 if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
   says "Dry run complete — nothing was installed."
@@ -359,7 +307,7 @@ says "  err                       explain / correct your last command"
 says "  err <question>            ask anything"
 says "  err download <model>      fetch a model from the HuggingFace Hub"
 says "  err run <model>           serve it on http://127.0.0.1:11500/v1"
-says "  err help                  full command list"
+says "  err -h                    full command list"
 if ! command -v fm >/dev/null 2>&1; then
   warn "explain / ask is off until the Apple Foundation Models CLI (fm) is available."
   warn "model management and serving work without it."

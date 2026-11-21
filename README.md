@@ -23,69 +23,79 @@ The installer is idempotent and safe to re-run. It treats the source directory a
 
 1. preflights Apple Silicon and macOS 26+;
 2. warns — but does not abort — when `fm` is missing;
-3. installs `uv` (Astral's standalone installer) and `gum` (sha256-checked GitHub release binary) only if missing;
+3. installs `uv` (Astral's standalone installer) only if missing — there is no other binary to download;
 4. runs `uv tool install mlx-vlm --with jinja2` only if `mlx_vlm.server` is missing;
-5. adds the uv/gum bin directories to `PATH` in `~/.zshrc` and sources `err-launcher.zsh` there — each line appended at most once, and printed before it is written.
+5. adds uv's bin directory to `PATH` in `~/.zshrc` and sources `err-launcher.zsh` there — each line appended at most once, and printed before it is written.
 
 Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.command` only wires the launcher; `install.sh` is the full install.
 
 ## Commands
 
 ```
-err v0.601.0 // in-terminal LLM & local MLX model runner
-TO ERR IS HUMAN.
+err                            the menu (bare)
+err -h                         the menu as well
 
-  err what | why             correct/explain the last command
-  err "<question>"           ask a command-related or any other question
-  err new                    start a fresh session (old one stays resumable)
-  err clear | -c             clear the current session, keep the id
-  err resume [n]             list sessions, or resume session number n
-  err delete                 delete all sessions
-  err status                 show what is running
-  err chat <model>           start a model and open the built-in interactive chat
-  err switch | swap <model>  switch to another model
-  err default <model>        set model as default
-  err run <model>            start a model on port 11500
-  err runs <model>           start an extra model on :11501+ (keeps :11500)
-  err stop <model>           stop a running model (default: all)
-  err tui                    interactive TUI (browse / run / download)
-  err list                   list installed models err can serve
-  err curated                show the full curated model catalog
-  err download <model>       download model(s) from the HuggingFace Hub
-  err remove <model>         delete model(s) from the disk
-  err settings               basic and advanced model settings
-  err info <model>           show details for a model (size, family, thinking)
-  err cache                  show on-disk footprint (APC, logs, hub, tool env)
-  err clean --apc|--logs|--venvs|--all
-                             delete regenerable caches (never model weights)
-  err uninstall              remove err from your system
-  err endpoint               print the base URL / model of the running server
-  err doctor                 check the install: config, backends, server, disk
-  err version | -v           show the current version
-  err help | -h              show this help (this is also what bare `err` does)
+err // 0.602.0 // local MLX LLM runner
 
-The first word decides the path: the verbs above always win, so a question that
-starts with one of them needs quoting. `what` / `why` explain the last command
-only when they are the whole command — `err why did that fail` is a question.
-err never runs a model-suggested command. It appends it to your shell history,
-so ↑ recalls it and you decide what to do with it — `suggest = ask` in err.conf
-puts it in the prompt buffer instead, `suggest = off` stops offering it.
+Available commands:
+       err 'question'         ask a question
+       err wtf                ask to explain or correct your last command
+
+       err new                start a fresh session
+       err resume             resume a session
+       err run <model>        start a model on port 11500
+       err swap <model>       swap to another model
+       err info               what is running, with details
+       err stop               stop the running model
+       err list               list installed models
+       err download <model>   download model(s)
+       err remove <model>     remove model(s)
+       err config             edit the config file
+       err cleanup            clear cached state
+       err uninstall          remove err
+       err doctor             check the install
 ```
+
+`err` and `-h` open the same interactive menu: arrow to a row,
+Enter to run it. The rows are the commands themselves, so typing
+`err run <model>` from the shell does the same thing. Off a terminal (a script,
+a pipe) the menu prints the same list instead of opening a picker. The question
+and `wtf` lines are shown, but they are typed directly — the cursor starts at
+`err new` and never moves onto them. `err help` is a question like any other
+word — only bare `err` and `-h` open the menu, so ordinary prompt words stay
+free.
+
+`err` with a leading word that is one of the verbs always runs the verb, so a
+question that starts with one needs quoting: `err 'why did that fail?'`.
+
 
 ## Explain & ask
 
-After any command, type `err` to get a short explanation of what it did (and a corrected command when it failed). `err <question>` asks a shell or general question; `err new`, `err clear`, `err resume` and `err delete` manage the conversation history that keeps follow-ups in context.
+After any command, `err wtf` explains what it did — and, if it failed, what to
+try instead. `err <question>` asks a shell or general question; `err new` and
+`err resume` manage the conversation that keeps follow-ups in context.
 
-`errc <cmd...>` is the shortcut for the failure case: it runs the command with stderr captured, then calls `err` on it. Use it when you know a command might blow up and you want the explanation immediately:
+**Output reaches the model one way: a pipe.** `ps aux | err wtf` hands the model
+what the command printed — err reads its own stdin and knows the producing
+command. A plain `err wtf` only has the command line and its exit code: the
+shell cannot capture stdout in a hook without turning fd 1 into a pipe, which
+breaks colours, pagers and full-screen programs (Atuin's pty-proxy exists for
+exactly this reason). Question mode attaches the last command, and whatever was
+piped in, as context — but only for the command that literally just ran.
 
 ```sh
-errc make build
-errc git push origin main
+ps aux | err wtf
+git status | err wtf
 ```
 
-The explain layer is configured in `err.conf` (prompts, temperature, backend): `backend = fm` uses the on-device Apple Foundation Model (the default), `backend = pcc` uses Private Cloud Compute, and `backend = mlx` points it at the local model server on `:11500`.
+The explain layer is configured in the config file (`err config`): `backend = fm`
+uses the on-device Apple Foundation Model, `backend = pcc` uses Private Cloud
+Compute, and `backend = mlx` points it at the local model server on `:11500`.
 
-**err never executes a command a model suggests.** With the default setting (`suggest = history` in `err.conf`) the suggestion is appended to your shell history: press **↑** to recall it, read it, edit it, then Enter — or never. `suggest = ask` drops it into the prompt buffer instead, `suggest = off` stops offering commands.
+**err never executes a command a model suggests.** With the default setting
+(`suggest = history`) the suggestion is appended to your shell history: press
+**↑** to recall it, read it, edit it, then Enter — or never. `suggest = ask`
+drops it into the prompt buffer instead, `suggest = off` stops offering commands.
 
 ### When something looks wrong
 
@@ -116,45 +126,48 @@ err "what does 'set -e' do?"
 err 'why did (my subshell) exit 1?'
 ```
 
-`errc` is never `noglob`-aliased — it runs real commands.
+`err` is `noglob`-aliased, so an unquoted `?` in a question does not blow up —
+but syntax characters (`|`, `>`, `;`) are parsed before any alias can help.
 
 ## Models
 
 err owns the full local-model lifecycle:
 
-- `err tui` — interactive menu to browse, run and download models.
-- `err list` / `err curated` — what is installed, and the curated catalog for every RAM tier.
-- `err download <model>` / `err remove <model>` — fetch from the HuggingFace Hub, or delete from disk.
-- `err chat <model>` — start a model and open the built-in interactive chat.
-- `err switch <model>` / `err default <model>` — change the active model, or the one used by default. Both also repoint the explain layer (`err.conf` → `backend`), so `err what` / `err <question>` answer with the model you picked: `apple-fm` → the on-device model, any HF repo → the `:11500` server. `err status` shows which backend err is currently using.
-- `err run <model>` / `err stop <model>` — start and stop a server (stop defaults to every running model).
-- `err status` / `err endpoint` — what is running and where to reach it.
-- `err settings` — basic and advanced launch settings.
-- `err info <model>` — size, family and thinking capability for a model.
-- `err cache` / `err clean` — report the on-disk footprint and delete regenerable caches (never model weights).
-  The prefix cache (`apc/`) is bounded at 6 GB in total (`ERR_APC_TOTAL_GB`),
-  evicting the least-recently-used model first; mlx-vlm's own `APC_DISK_MAX_GB`
-  is per model, so on its own it never bounded the sum.
-- `err uninstall` — remove err from the system.
-
+- `err list` — installed models. On a terminal it opens a look-only list: one
+  `arr //` cursor you can move, selecting does nothing. Piped output stays bare
+  ids for scripts.
+- `err download` / `err remove` — fetch from the HuggingFace Hub (curated list or
+  a typed repo id), or delete from disk. Models already on disk are not offered
+  for download. `apple-fm` cannot be removed.
+- `err run <model>` / `err swap <model>` — start a model on `:11500`, or replace
+  the one running there. `err run` with no model reports
+  `arr // <model> already running` when one is serving. One model at a time:
+  there is no default to set, the model you last ran is the one err answers from.
+- `err info` — the three values an OpenAI client needs: model, base URL
+  (`http://localhost:11500/v1`) and API key (`none`), or the same
+  `arr // nothing is running — start one with 'err run <model>'` line as
+  `err swap`.
+- `err stop` — stop what err started. It also ends the conversation: a fresh
+  session is prepared for the next start (the turn/token counter goes back to 0).
+- `err cleanup` — free space: kv-cache, logs, sessions, chats or all, with
+  the size of each shown before you pick (never model weights). `err cleanup all`
+  goes straight to the catch-all, and `err cleanup logs` to that target.
+  The prefix cache (`apc/`) is bounded in total; mlx-vlm's own `APC_DISK_MAX_GB`
 ### The Apple model is a model choice too
 
-The on-device Apple Foundation Model appears in the same menus as `apple-fm`,
-marked as the default with a leading `*`:
+The on-device Apple Foundation Model appears in the same menus as `apple-fm`:
 
 ```
-err run          # * apple-fm (Apple on-device) is one of the choices
-err default      # ... including "make the Apple model the default"
+err run          # err run apple-fm  (Apple on-device) is one of the choices
 err stop apple-fm
 ```
 
 It is not an MLX repo and needs no download — selecting it starts `fm serve` on
 its own port (`err.conf` → `port`, default `8080`) instead of `:11500`, and
-`err status` reports it alongside any MLX server. `err endpoint` keeps pointing
-at `:11500` because that is the port OpenAI clients and the pi extension expect;
-for the Apple model the base URL is `http://127.0.0.1:8080/v1`.
+`err info` reports it. OpenAI clients and the pi extension expect `:11500`; for
+the Apple model the base URL is `http://127.0.0.1:8080/v1`.
 
-State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`config.zsh`, `sessions/`, `chats/`, logs, the prefix cache and cached catalogs). `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
+State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`err.conf`, `sessions/`, `chats/`, logs, the prefix cache and the cached catalog). `err config` opens the one config file; `temperature` / `max_tokens` there are shared by `err "<question>"`, and extra launch flags are repeated `server_flag = --kv-bits 8` lines. `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
 
 Model weights are never in err's state: they live in the HuggingFace hub cache, `~/.cache/huggingface/hub/models--<org>--<name>/`, where the model directory holds `snapshots/…` symlinks into `blobs/`. That is why a fully downloaded 4B model can show as a few MB in `du` — the weights are in `blobs/`, shared by link.
 
@@ -164,7 +177,7 @@ Model weights are never in err's state: they live in the HuggingFace hub cache, 
 
 ```sh
 err run mlx-community/Qwen3.5-4B-MLX-4bit
-err endpoint   # prints the base URL and model
+err info       # base URL and model
 ```
 
 Any OpenAI client works against it — no API key:

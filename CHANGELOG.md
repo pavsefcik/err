@@ -5,7 +5,257 @@ All notable changes to err are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The main menu shows its typed-only commands.** `err 'question'` and
+  `err wtf` now appear above the pickable rows under an `Available commands:`
+  heading; the `arr //` cursor starts at `err new` and cannot move above it.
+  The version line and blank lines are part of the printed (non-TTY) rows too.
+- **`err download` skips models already on disk.** The catalog picker omits
+  them, and an explicit `err download <installed>` prints
+  `arr // <model> already downloaded` instead of re-fetching.
+
+- **Menus and commands trimmed.** `err chat`, `err menu` and `err tui` are gone
+  (the old full-screen TUI code and `lib/err_repl.py` removed). `err 'question'`
+  and `err wtf` stay typed commands: they are shown in the menu header, not as
+  pickable rows.
+- **`err config` no longer hits micro's stale-backup prompt** (it opens micro
+  with a fresh backup dir and backups off).
+- **`err info` is three lines:** `Model`, `Base URL`, `API key: none` (the model
+  id is highlighted), or `arr // nothing is running`. `err run` says
+  `arr // <model> already running`.
+- **`err cleanup`** replaces `clear-cache`, with an `all` row that clears
+  kv-cache, logs, sessions and chats together. An explicit target
+  (`err cleanup all`, `err cleanup logs`) skips the picker.
+- **Ordinary words are prompts.** `err help` no longer opens the menu; bare
+  `err` and `err -h` do. `err chat`, `err menu` and `err tui` are not reserved
+  either, so they reach the model like any other question.
+- **`err run` with no model is a status answer when one is serving:** it prints
+  `arr // <model> already running` instead of opening the picker; switching is
+  `err swap`. `err run <model>` still starts/replaces explicitly.
+- **`err swap` / `err run` use one rewritten status line:**
+  `stopping <old> on http://…` becomes `loading <new> on http://…` (with a
+  spinner), which becomes `arr // running: <new> on http://…`. No extra lines
+  and no trailing backend chatter. A swap picker omits the model that is
+  already serving, and says so when there is nothing else installed.
+- **`err new` says what it did:** `arr // new session` (previously silent, so
+  it looked like a no-op). The reset itself was working; a test now pins both
+  the confirmation and that the next ask carries no history.
+- **The turn/token counter follows the current session.** err.py now publishes
+  the session's real turn and token totals (`_ERR_TURNS_FILE`, alongside
+  `_ERR_TOKENS_FILE`); `new`/`clear` publish `0`, `resume` adopts the resumed
+  session's numbers, and the launcher no longer hardcodes `1` or keeps the old
+  session's token count. A re-source no longer freezes the prompt either: the
+  counters and ownership survive it, and err reclaims its own `RPROMPT` shape
+  instead of mistaking it for the user's.
+- **`err swap` with nothing running** now answers in err's voice:
+  `arr // nothing is running — start one with 'err run <model>'`, and
+  `err info` uses the exact same line instead of a shorter variant.
+- **`err list` on a terminal is a look-only list:** one `arr //` cursor that
+  moves up and down, but selecting does nothing. Piped output stays bare ids
+  for scripts, and `--json` is unchanged.
+- **`err stop` also ends the conversation:** it mints a fresh session and
+  publishes `0` turns / `0` tokens, so the counter clears and the next start
+  answers without the previous context.
+- **`err swap` no longer repeats the running model** before opening its picker.
+- **Faster, colourful launch spinner** (zsh engine and err.py): the
+  `loading <model> on http://…` status line is rewritten in place and replaced
+  by `arr // running: <model> on http://…` when the server answers. Piped/CI
+  runs get the states as separate lines.
+
+### Fixed
+
+- **`err run` picked the Apple model and downloaded it from Hugging Face.**
+  `_err_headless_run` tested for `apple-fm` only on an explicit argument, then
+  fell through to the repo-download path for a picked one. The check now runs
+  after the picker (as `err chat` already did), for every entry point.
+- **`err download` could try to fetch a menu sentinel.** Picking "Hugging Face
+  ID" in the catalog picker yields `__hf_id__`; the help menu re-dispatches its
+  pick as `err download __hf_id__`, which used to go straight to the download
+  loop (404 on the Hub). `_err_headless_download` now resolves the sentinel —
+  prompting for the id — for every entry point, and the tests pin it.
+- **The submenu picker sized itself from `$LINES`.** A stale value after a
+  window resize made the frame taller than the screen, so the list drew off the
+  bottom and could not be scrolled. The picker now reads the live size
+  (`stty size`) and also pages (`PgUp`/`PgDn`, `Home`/`End`).
+
+### Changed
+
+- **Submenu order:** `err run` lists the model served last first (Enter on the
+  first row is the common case), and the Apple on-device model is always the
+  last row — it is a backend, not a repo to download.
+- **Menus: one blank line before the key hints.** `_err_pick`, the main TUI,
+  chat history and the download screen all separate the list from the footer.
+- **`err resume` uses the same picker.** Rows are `err resume <n>  <age>  <tty>
+  <cwd>  <title>` with the `arr //` cursor, arrows/`j`/`k`/`PgUp`/`PgDn`, Enter
+  resumes, esc prints nothing. Off a terminal it still prints the rows.
+- **`err info` never starts a model.** With nothing on :11500 it says so and
+  lists the installed ids; it is read-only.
+- **`err swap` needs a running model.** Nothing running prints
+  `nothing is running — start one with 'err run <model>'` instead of offering a
+  picker.
+- **`err chat` with no argument attaches to what is running**, and says to run
+  `err run` first when nothing is. `err chat <model>` still starts that model.
+- **`err list` is only a list.** The terminal picker (details → Run/Swap) is
+  gone; use `err info` / `err run` / `err swap`.
+- **`err config` prefers micro, then nano**, before `$VISUAL`/`$EDITOR`.
+- **Prompts cancel with esc.** `_err_input` (Hugging Face ID, tokens, custom
+  model ids, names) is a small line editor: esc cancels, backspace and `^U`
+  edit, Enter keeps the default, arrow keys don't cancel.
+- **`err clear-cache`** dropped its title and the catch-all row, and an absent
+  cache now reads `0B` instead of `empty`.
+
+- **No dialog toolkit: gum is gone.** Menus are err's own (`_err_pick`): rows
+  as arguments, `arr //` on the cursor row with the rest indented to match, one
+  footer line — `←↓↑→ navigate • esc return • enter submit` (plus `space mark`
+  for the multi-select `remove`) — and `PgUp`/`PgDn`/`Home`/`End`, `j`/`k`.
+  Painting goes to stderr, keys are read from stdin, only the pick goes to
+  stdout. The help menu keeps its `err // <version> // local MLX LLM runner`
+  header as a normal heading line. The other dialogs became four small
+  primitives: `_err_confirm` (y/N on `read -q`), `_err_input` (`read`, Enter
+  keeps the default), `_err_style` (ANSI, colour only on a terminal) and
+  `_err_spin` (title + command); `gum pager` is `$PAGER` and `gum write` is
+  `$EDITOR`. `err resume` numbers its rows instead of opening a picker.
+  `install.sh` no longer downloads gum, `err doctor` no longer checks for it.
+
+- **One config file.** `err.conf` lives in `$ERR_STATE_DIR` (seeded from the
+  repo template) and is the only one: `err config` opens it, err.py and the
+  engine read the same keys, and repeated `server_flag` / `chat_flag` lines
+  replace `config.zsh`'s `ERR_CHAT_FLAGS` / `ERR_SERVER_FLAGS` arrays. An
+  existing `config.zsh` is lifted across once (managed block + arrays) and left
+  in place. `err settings` and its managed-block rewrite are gone.
+- **One temperature, one max_tokens.** `err "<question>"` and `err chat` share
+  `temperature` / `max_tokens` (0.7 / 2048 in the template) instead of the
+  explain path quietly using 0.3 / 200.
+- **`err resume` is a picker.** Rows are `err resume <n>  <age>  <tty>  <cwd>
+  <title>`; off a terminal (or with esc) it still prints the list.
+- **Dead code removed:** `err runs` (extra servers), `err status`, `err
+  endpoint`, `err default`/`set-default`, `err settings` and its managed-block
+  writer, `err curated`, the `config.zsh` template writer.
+
+- **`err` and `err help` are one interactive menu** (`lib` support in
+  `err-models.zsh`: `_err_help_menu` / `_err_help_rows`). Every row is a real
+  command — `err run <model>`, `err info`, `err clear-cache kv-cache 500 MB` —
+  and choosing one hands `<verb>\t<rest>` back to the launcher, which
+  re-dispatches it through `err`. No `eval`, so the menu can never drift from
+  the typed command. Rows that need an argument open a picker (installed
+  models, the curated catalog) or a text field (a question); `apple-fm` is
+  excluded from `err remove`. Off a terminal the same rows print as text.
+- **The vocabulary shrank to what the menu shows.** Removed: `errc` (it was the
+  `tee` pipe that breaks full-screen programs — `cmd | err wtf` is the one way
+  in), `what`/`why` (`err wtf` survives), `status`/`endpoint` (folded into
+  `err info`), `cache`/`clean` (`err clear-cache`), `settings` (`err config`),
+  `default` (the last model you ran *is* the default), `switch` (`swap`),
+  `clear` (`new`), `delete` (`err clear-cache sessions`), `runs` (one model at
+  a time), `curated`/`curator`. Hidden but working: `tui`, `version`, `ls`, `rm`.
+- **`err info` answers "what is running".** Model, path, base URL and backend;
+  nothing running means it offers the installed models, starts the pick, then
+  prints the block. `err list` shows the same block for a model that is not
+  running (with its size and a Run/Swap choice), and stays plain data when
+  piped or given `--json`.
+- **`err clear-cache` measures before it deletes:** kv-cache, logs, sessions,
+  chats, each with its size, `all` for everything. Weights are never touched.
+- **`err stop` and friends speak in `arr //`** — the amber prefix the answers
+  carry — so an action line never reads as shell output. Colour is dropped when
+  stdout is not a terminal.
+
+### Changed
+
+- **The curated catalog is `err-curator.md`.** The list was `curated-llms.md`,
+  a name that read like it belonged to the tools err was forked from, so the
+  file, the state cache (`~/.cache/err/err-curator.md`) and the upstream refresh
+  URL all carry the new name. Nothing is lost on upgrade: a pre-rename cache is
+  adopted (with its `.seed`/`.fetched` sidecars, so a fresher fetched list still
+  wins when the bundled bundle is unchanged), and the one-time migration out of
+  `~/.cache/marv` lands the catalog under the new name. The menu and `err
+  curated` tests no longer hardcode a repo id — they read the first entry out of
+  the bundled file, so the curator can rewrite the list without breaking CI.
+- **The answer prefix is `arr // `, in amber (`1;38;5;214`).** ` // ` is err's
+  own separator (the help screen and the version line already use it), so the
+  model's voice reads as one gesture with the rest of the tool instead of a
+  stray `arr:`. Amber is the one accent nothing else claims — menu chrome is
+  `1;35` magenta, the prompts are `1;36` cyan, `212` pink is the catalog
+  headers and the TUI sign-off — so the answer gets its own lane, and warm
+  reads as "this is the reply". Escapes are printed only when stdout is a
+  terminal and `NO_COLOR` is unset, so `err "<q>" | pbcopy` and the tests still
+  get plain `arr // ` text. One helper (`answer_prefix()`) owns it, so the
+  streaming open and the `strip_thinking` reprint cannot drift.
+
 ### Added
+
+- **err now sees what a command printed — when it can.** `cmd | err why` reads
+  the piped output from err's own stdin and explains the producing side of the
+  pipeline (the launcher strips the trailing `| err why` stage that `preexec`
+  records, and marks the exit code unknown because a pipeline's status is not
+  the producer's). `errc` now tees **stdout as well as stderr**, so its
+  explanation is grounded in the output and not just the error text. Both are
+  bounded (`output_lines`, default 40 lines / 3000 chars) and cleared on every
+  other command's `preexec`, so a stale `errc` capture can never attach itself
+  to a later command.
+- **Question mode carries the last command as context** (`Command:`, exit code,
+  and the captured output when err has it), for exactly one turn — the
+  launcher clears `_ERR_LAST_FRESH` once err has answered. A follow-up like
+  `err what is going on?` no longer answers from nothing.
+
+Not captured, on purpose: a plain command's stdout. Doing that from a shell
+hook means `exec > >(tee …)`, i.e. fd 1 becomes a pipe for the command's whole
+run — colours, pagers and full-screen programs break. `errc` and `| err` are the
+opt-in paths; Atuin's pty-proxy is the only alternative that stays transparent.
+
+### Added
+
+- **Every model err starts is shut down again when it goes idle.** The idle
+  watchdog used to cover `fm serve` only, so a model started by `err run`,
+  `err switch`, `err chat`, `err runs` or err's own mlx autostart held its
+  weights in RAM until you noticed. Now every start path arms one watchdog
+  (err.conf → `idle_timeout_minutes`, default 10). Idle means: no heartbeat
+  stamp, no established connection on the port, and under 0.25 s of CPU since
+  the last 20 s poll — so clients err knows nothing about (curl, pi, another
+  app) keep the server alive while they work, and `err chat` stamps its own
+  port while it streams. Heartbeats are per port (`mlx_heartbeat-<port>`), so a
+  chat on `:11501` cannot keep `:11500` awake. `err status` never stamps one:
+  it is polled by clients and would otherwise hold every model open forever.
+- The engine's `err run apple-fm` never actually armed the watchdog — it passed
+  an unset `pid`. Fixed, and the pid is now the listener that owns the port
+  rather than the uv shim in `$!`, whose death leaves the child server running.
+
+### Changed
+
+- **The two system prompts now have one definition each.** They were byte-identical
+  copies in `err.conf` and in `err.py`'s `DEFAULT_*` constants — four strings,
+  two meanings, and nothing to catch the drift when one was edited. The defaults
+  live in `err.py`; `err.conf` documents the override instead of restating it.
+  `err doctor` now prints each prompt in force with its origin (`builtin` /
+  `custom`), via `err.py --prompt explain|question`, so "answers got worse"
+  becomes a diagnosis. The explain key is now `explain_system_prompt`
+  (`system_prompt` is still read, legacy confs keep working, the new name wins).
+  `tests/test_err.py` asserts the prompt actually sent is the one in force, that
+  both override keys are honoured, and that `err.conf` stops duplicating text.
+- The explain prompt now ends with "Do not include a code block." Its first
+  fenced line is fed to the suggestion channel, so a volunteered block meant
+  `err what` could put a command in your history.
+- **Startup is a spinner, not a log.** `err <question>` shows one animated
+  `⠋ starting <model> on http://127.0.0.1:11500` line while the weights load and
+  replaces it with `ready <model> on http://127.0.0.1:11500`, in the engine's
+  headless launch (so `err run` shares it) and on err.py's fm/autostart waits.
+  A pipe or CI gets the same message as one plain line. No duplicated
+  "starting" from both err.py and the engine, and no `err:` prefix on
+  informational lines — `err:` is reserved for diagnostics.
+- **The answer carries an `arr:` prefix** (`arr: Hello! …`), including after a
+  503 loading retry, so model output is visibly distinct from err's own lines
+  now that the `🤖` emoji is gone.
+- **The startup preload is waited out instead of failing the question.**
+  mlx-vlm serves `/v1/models` while its preload is still running and rejects
+  the first chat request with `503 model_loading`; err treated that as a failed
+  answer. Readiness now comes from `/health`'s `model_ready` (falling back to
+  `/v1/models` for servers without `/health`), and the chat request retries the
+  503 with a `Waiting for <model> to finish loading…` line. A 503 body is also
+  printed as its message instead of a raw JSON dict.
+- **No emojis in the UX.** The Apple FM ready marker (`🟢`) is gone, as are
+  `❌`, `✅`, `❔`, `💥`, `🤔` and the answer's `🤖` prefix: errors read
+  `err: …`, explain headers read `<cmd> (exit N)`, and the answer opens with
+  `arr:`. Menu glyphs (`✓`, `✗`, `●`, `▲`, arrows) stay — they are layout, not
+  decoration.
 
 - `err "<question>"` / `err what` start the model themselves when `backend = mlx`
   and nothing serves `:11500`. err.py resolves the saved model and calls the

@@ -62,28 +62,6 @@ _err_flag_set() {
   eval "${name}=( \"\${out[@]}\" )"
 }
 
-# ---------------------------------------------------------------------------
-# Terminal screen state.
-#
-# The interactive TUI runs on the alternate screen buffer (?1049) so quitting
-# restores whatever the shell showed before: no leftover err banner, no
-# destroyed scrollback. _ERR_TUI_ACTIVE tracks whether we own the alt buffer so
-# a single restore path (also used by the EXIT trap) stays idempotent.
-# ---------------------------------------------------------------------------
-typeset -g _ERR_TUI_ACTIVE=0
-
-_err_tui_enter() {
-  (( _ERR_TUI_ACTIVE )) && return 0
-  _ERR_TUI_ACTIVE=1
-  print -n -- $'\e[?1049h\e[H\e[2J'
-}
-
-_err_tui_leave() {
-  (( _ERR_TUI_ACTIVE )) || return 0
-  _ERR_TUI_ACTIVE=0
-  print -n -- $'\e[0m\e[?25h\e[?1049l'
-}
-
 # One-time, idempotent migration from the old `ymlx` layout. Runs on every
 # launch but only acts when the old state exists and the new one doesn't yet.
 # Copy-then-switch: the old tree is left intact for one release so a downgrade
@@ -187,44 +165,20 @@ EOF_YMLX
 # alt screen).
 
 # CLI help. Lives here (not inside err()) so the --help fast path can print it
-# before any of the TUI helpers are defined.
+# before any of the menu helpers are defined.
 _err_usage() {
-  cat <<'USAGE'
-err — local MLX model manager + OpenAI-compatible server on :11500
-
-Usage:
-  err tui                    interactive TUI (browse / run / download)
-  err run [<model>]          start a model on :11500 (detached); no arg = menu
-  err runs [<model>]         start an EXTRA model on :11501+; keeps :11500 as is
-  err chat [<model>]         chat with the default/last model, or pick one
-  err switch|swap [<model>]  stop :11500 and start another model
-  err default [<model>]      set the model `run`/`chat` prefer
-  err stop [<model>|--all]   stop a running model (default: all)
-  err status [--json]        show what is running
-  err list [--json] [--all]  list installed models mlx-vlm can serve
-  err download [<model>]...  download model(s); no arg = curated menu
-  err remove [<model>]...    delete model(s) from the disk
-  err curated [--json]       show the full curated model catalog (all tiers)
-  err info [<model>] [--json]  size, family, thinking knobs
-  err settings               basic and advanced model settings
-  err cache [--json]         show on-disk footprint (APC, logs, hub, tool env)
-  err clean --apc|--logs|--venvs|--all [--dry-run] [--force]
-                                  delete regenerable caches (never model weights)
-  err endpoint [--json]      print the base URL / model of the running server
-  err uninstall              stop servers and unwire ~/.zshrc
-  err version | -v           print the err version
-  err help | -h | --help     show this help
-
-Commands print data on stdout and human logs on stderr, so they compose; pass
---json where offered for machine-readable output. Exit codes: 0 ok, 1 failure,
-2 usage error.
-USAGE
+  print "err — bare 'err' (or 'err -h') opens the menu (arrows + enter)."
+  print ""
+  print "  err 'question'   err wtf      err new       err resume"
+  print "  err run|swap <model>           err info      err stop"
+  print "  err list         err download|remove <model>"
+  print "  err config       err cleanup   err doctor   err uninstall"
 }
 
 # Upstream of the bundled curated catalog. `main` is the live list, so an
 # interactive startup can pick up models added between releases;
 # ERR_CATALOG_URL overrides it and an empty value disables the refresh.
-_ERR_CATALOG_URL_DEFAULT="https://raw.githubusercontent.com/pavsefcik/err/main/curated-llms.md"
+_ERR_CATALOG_URL_DEFAULT="https://raw.githubusercontent.com/pavsefcik/err/main/err-curator.md"
 
 # Is $1 a usable curated catalog? Shape check only: at least one line that STARTS
 # with a model id (`org/name`, optionally '#'-commented or followed by a tagline),
@@ -303,7 +257,7 @@ _err_catalog_sync() {
   _err_catalog_valid "$cache"
 }
 
-# Parse the curated catalog (the repo's bundled curated-llms.md) into flat,
+# Parse the curated catalog (the repo's bundled err-curator.md) into flat,
 # all-tiers model rows. Emits one US-delimited (\x1f) line per distinct entry:
 #
 #   tier<US>tier_name<US>title<US>ids<US>tags<US>description
@@ -332,7 +286,7 @@ _err_catalog_sync() {
 #   * 3-line title-first:  <title> / <id(s)> / <tags>
 #   * 2-line id/tags:      <id> / <tags>
 #   * leading flag emoji:  "<flag> <id>" (cosmetic, peeled)
-# Shared by the TUI download menu and `err curated`.
+# Shared by `err download`.
 _err_parse_catalog() {
   local file="$1"
   [[ -r "$file" ]] || return 0
@@ -937,7 +891,7 @@ _err_purge_orphan_blobs() {
 
 # ---- on-disk footprint + hygiene (`err cache` / `err clean`) --------
 #
-# Self-contained on purpose: both verbs run BEFORE err.zsh's gum/curl/
+# Self-contained on purpose: both verbs run BEFORE err.zsh's curl/
 # mlx-vlm tool check (reporting the footprint should work on a half-broken
 # install), so they cannot rely on err()'s locals or on functions defined
 # inside its body.

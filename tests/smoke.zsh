@@ -1,45 +1,27 @@
 #!/usr/bin/env zsh
-# End-to-end smoke tests: the REAL launcher, the REAL err.py, the REAL engine
-# dispatch — against a mock OpenAI-compatible server, in an isolated state dir
-# and an isolated err.conf. Nothing here needs `fm`, models, or network.
+# End-to-end smoke: the REAL launcher + err.py + engine, against a mock
+# OpenAI server, in a throwaway ERR_STATE_DIR / ERR_CONF / ERR_HUB_DIR.
 #
-# These assert what the USER sees (output, exit code, err.conf, history), not
-# that an internal function was called. Every bug found so far lived in that gap.
+# These assert what the USER sees (output, exit code, conf, history), not
+# internal calls. Menus are err's own; off a terminal they print their rows and
+# abort, which is the same code path a human drives with keys.
 #
-# Usage: zsh tests/smoke.zsh [-v]
+# Usage: zsh tests/smoke.zsh
 emulate -L zsh
 setopt pipefail
 set -u
 
 REPO="${0:A:h:h}"
-VERBOSE=0
-[[ "${1:-}" == "-v" ]] && VERBOSE=1
+typeset -g _FAILS=0 _PASSES=0 _TMP=""
 
-typeset -g _FAILS=0 _PASSES=0
-typeset -g _TMP=""
-typeset -g _MOCK_PID=""
-
-cleanup() {
-  [[ -n "$_MOCK_PID" ]] && kill "$_MOCK_PID" 2>/dev/null
-  [[ -n "$_TMP" ]] && rm -rf "$_TMP"
-}
+cleanup() { [[ -n "$_TMP" ]] && rm -rf "$_TMP"; [[ -n "${_MOCK_PID:-}" ]] && kill "$_MOCK_PID" 2>/dev/null }
 trap cleanup EXIT INT TERM
 
-ok()    { (( _PASSES++ )); print "  ok   $1" }
-fail()  { (( _FAILS++ ));  print "  FAIL $1"; [[ -n "${2:-}" ]] && print "       $2" }
-check() { # $1 expected, $2 actual, $3 label
-  if [[ "$1" == "$2" ]]; then ok "$3"; else fail "$3" "expected: [$1]  actual: [$2]"; fi
-}
-contains() { # $1 needle, $2 haystack, $3 label
-  if print -r -- "$2" | grep -qF -- "$1"; then ok "$3"; else
-    fail "$3" "missing: [$1] in: [${2[1,300]}]"
-  fi
-}
-not_contains() {
-  if print -r -- "$2" | grep -qF -- "$1"; then
-    fail "$3" "unexpected: [$1] in: [${2[1,300]}]"
-  else ok "$3"; fi
-}
+ok()   { (( _PASSES++ )); print "  ok   $1" }
+fail() { (( _FAILS++ ));  print "  FAIL $1"; [[ -n "${2:-}" ]] && print "       ${2[1,300]}" }
+contains()     { if print -r -- "$2" | grep -qF -- "$1"; then ok "$3"; else fail "$3" "missing: [$1] in: [${2[1,300]}]"; fi }
+not_contains() { if print -r -- "$2" | grep -qF -- "$1"; then fail "$3" "unexpected: [$1] in: [${2[1,300]}]"; else ok "$3"; fi }
+check()        { if [[ "$1" == "$2" ]]; then ok "$3"; else fail "$3" "expected [$1] actual [$2]"; fi }
 
 # ── isolated environment ────────────────────────────────────────────────
 _TMP=$(mktemp -d "${TMPDIR:-/tmp}/err-smoke.XXXXXX")
@@ -47,8 +29,8 @@ export ERR_STATE_DIR="$_TMP/state"
 export ERR_CONF="$_TMP/err.conf"
 export ERR_HUB_DIR="$_TMP/hub"          # keep the real HF cache out of this
 export ERR_MLX_MODEL="mock/model"       # "the model lives on that server"
-mkdir -p "$ERR_HUB_DIR"
-mkdir -p "$ERR_STATE_DIR"
+export EDITOR=true                      # `err config` must not really open vi
+mkdir -p "$ERR_HUB_DIR" "$ERR_STATE_DIR" "$_TMP/bin"
 
 python3 "$REPO/tests/mock_serve.py" "$_TMP/port" >"$_TMP/mock.log" 2>&1 &
 _MOCK_PID=$!
@@ -60,8 +42,7 @@ if [[ ! -s "$_TMP/port" ]]; then
 fi
 MOCK_URL="$(<"$_TMP/port")"
 
-# A fake model in the throwaway hub, so the engine's read-only verbs have
-# something to describe (never used to launch anything).
+# A fake model in the throwaway hub, so read-only verbs have something to show.
 FAKE_MODEL="mock-org/Fake-4bit"
 mkdir -p "$ERR_HUB_DIR/models--mock-org--Fake-4bit/snapshots/rev"
 print -r -- "weights" > "$ERR_HUB_DIR/models--mock-org--Fake-4bit/snapshots/rev/model.safetensors"
@@ -76,8 +57,7 @@ sed -e "s|^backend = .*|backend = mlx|" \
     "$REPO/err.conf" > "$ERR_CONF"
 print -r -- "mock/model" > "$ERR_STATE_DIR/last-model"
 
-# Run commands in a real interactive zsh (aliases + hooks active), sharing the
-# isolated env. $1 = script body.
+# Run commands in a real interactive zsh (aliases + hooks active).
 int_sh() {
   MOCK_URL="$MOCK_URL" zsh -f -i 2>&1 <<EOF
 PROMPT=''; RPROMPT=''; PS1=''
@@ -86,32 +66,34 @@ $1
 EOF
 }
 
-# Non-interactive runner: no prompt, no ZLE — for anything that does not need
-# the hooks (version, help, status, usage errors). Output is clean by design.
+# Non-interactive runner: no prompt, no ZLE.
 cmd_out() {
   zsh -f -c "source '$REPO/err-launcher.zsh'; $1" 2>&1
 }
 
-# Strip any escape sequences, just in case a prompt or colour leaks through.
-plain() { print -r -- "$1" | perl -pe 's/\e\[[0-9;?]*[a-zA-Z]//g' | tr -d '\r' }
-
 print "environment: mock on $MOCK_URL, state in $ERR_STATE_DIR"
 
-# ── 1. surface ──────────────────────────────────────────────────────────
+# ── 1. the menu ────────────────────────────────────────────────────────
+# An interactive `err` needs a terminal; without one it prints the rows,
+# which is exactly what a script (or this test) should see.
 print "surface"
 _out=$(cmd_out 'err')
-contains "TO ERR IS HUMAN."  "$_out" "bare err shows the help screen"
-contains "err runs <model>"  "$_out" "help lists err runs under err run"
-contains "err what | why"    "$_out" "help lists err what | why"
-not_contains "err wtf"       "$_out" "help keeps err wtf hidden"
+contains "err new"           "$_out" "bare err shows the menu rows"
+contains "err run <model>"   "$_out" "the menu lists err run"
+contains "err cleanup"       "$_out" "the menu lists err cleanup"
+not_contains "err settings"  "$_out" "err settings is gone (one config file)"
+not_contains "err status"    "$_out" "err status folded into info"
+not_contains "err chat"      "$_out" "err chat is gone"
+not_contains "err tui"       "$_out" "err tui is gone"
 
-check "0.601.0" "$(cmd_out 'err version')" "err version prints VERSION"
+_out=$(cmd_out 'err help')
+contains "A glob matches filenames." "$_out" "err help is a prompt, not the menu"
+contains "0.602.0" "$(cmd_out 'err version')" "err version prints VERSION"
 
 # ── 2. explain + ask reach the model ───────────────────────────────────
 print "explain / ask"
-_out=$(int_sh '_err_last_cmd="ls -la"; _err_last_exit=0; err what')
-contains "💡" "$_out" "err what explains the last command"
-contains "A glob matches filenames." "$_out" "the explanation came from the configured backend"
+_out=$(int_sh '_err_last_cmd="ls -la"; _err_last_exit=0; err wtf')
+contains "A glob matches filenames." "$_out" "err wtf explains the last command"
 
 _out=$(int_sh 'err "what is a glob"')
 contains "A glob matches filenames." "$_out" "err <question> asks the backend"
@@ -122,51 +104,43 @@ contains "SUGGEST_IN_HISTORY=yes" "$_out" "suggestion lands in history for ↑"
 _out=$(int_sh 'err "what is a glob" >/dev/null; print "BUF=[$BUFFER]"')
 contains "BUF=[]" "$_out" "nothing is pre-filled into the prompt buffer"
 
-# ── 3. backend switching actually changes what err uses ────────────────
-print "backend switching"
-_out=$(cmd_out 'err default apple-fm')
-grep -q '^backend = fm' "$ERR_CONF" && ok "err default apple-fm writes backend=fm" \
-  || fail "err default apple-fm writes backend=fm" "conf has: $(grep '^backend' "$ERR_CONF")"
-contains "on-device Apple model" "$_out" "err default says what err will use"
-_def=$(cat "$ERR_STATE_DIR/default-model" 2>/dev/null)
-check "apple-fm" "$_def" "default-model recorded"
+last_has() { # $1 needle
+  local _i
+  for _i in {1..40}; do
+    [[ -f "$_TMP/port.last" ]] && grep -qF -- "$1" "$_TMP/port.last" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+last_dump() { head -c 500 "$_TMP/port.last" 2>/dev/null }
 
-_out=$(cmd_out 'err default mock/model')
-grep -q '^backend = mlx' "$ERR_CONF" && ok "err default <hf model> writes backend=mlx" \
-  || fail "err default <hf model> writes backend=mlx" "conf has: $(grep '^backend' "$ERR_CONF")"
+# ── 3. the model gets what a command printed (the one surviving pipe) ──
+print "captured output"
+_out=$(int_sh 'print "PIPED_MARKER_42" | err wtf')
+contains 'print "PIPED_MARKER_42"' "$_out" "piped err wtf explains the producing command"
+not_contains "| err wtf" "$_out" "the | err stage is not recorded as the command"
+last_has "PIPED_MARKER_42" && ok "piped output reached the model" \
+  || fail "piped output reached the model" "last request: $(last_dump)"
 
-# Back to the mock before asking again (asking on the fm backend would start
-# the real Apple server — never do that from a test).
-cmd_out 'err default mock/model' >/dev/null
+_out=$(int_sh 'print "CTX_MARKER_9" >/dev/null; err "what just happened" >/dev/null')
+last_has "the command I just ran" && ok "a question carries the last command as context" \
+  || fail "a question carries the last command as context" "last request: $(last_dump)"
+
+# ── 4. the last model you ran is the one err answers from ─────────────
+print "model resolution"
+print -r -- "mock/model" > "$ERR_STATE_DIR/last-model"
 _out=$(int_sh 'err "still there"')
-contains "A glob matches filenames." "$_out" "err still answers after the round-trip"
-
-# ── 4. status tells the truth, including env overrides ────────────────
-print "status / overrides"
-_out=$(cmd_out 'err status')
-contains "backend=mlx" "$_out" "status reports the effective backend"
-
-_out=$(ERR_BACKEND=fm cmd_out 'err status')
-contains "ERR_BACKEND overrides err.conf" "$_out" "status names a stray ERR_BACKEND"
-
-_out=$(ERR_BACKEND=fm cmd_out 'err default mock/model')
-contains "ERR_BACKEND=fm" "$_out" "switch/default warns when env overrides the file"
+contains "A glob matches filenames." "$_out" "err still answers after a round-trip"
 
 # ── 5. guard rails ─────────────────────────────────────────────────────
 print "guard rails"
-_out=$(cmd_out 'err runs apple-fm; print "RC=$?"')
-contains "single on-device server" "$_out" "err runs refuses the Apple sentinel"
-contains "RC=2" "$_out" "err runs exits 2 for the sentinel"
+# A dropped verb is no longer reserved, so `err runs` is just a question now.
+_out=$(cmd_out '_err_last_cmd=""; _err_consumed=1; err wtf; print "RC=$?"')
+contains "no command to explain." "$_out" "err wtf with nothing recorded explains that"
+contains "RC=1" "$_out" "err wtf exits 1 when there is nothing to explain"
 
-_out=$(cmd_out '_err_last_cmd=""; _err_consumed=1; err why; print "RC=$?"')
-contains "No command to explain." "$_out" "err why with nothing recorded explains that"
-contains "RC=1" "$_out" "err why exits 1 when there is nothing to explain"
-
-_out=$(int_sh 'errc false >/dev/null 2>&1; print "RC=$?"')
-contains "RC=1" "$_out" "errc preserves the command exit code"
-
-_out=$(int_sh 'errc true >/dev/null 2>&1; print "DONE"; print "HASHELP=$(err | grep -c "TO ERR IS HUMAN")"')
-contains "HASHELP=1" "$_out" "errc did not leave the help screen behind"
+_out=$(cmd_out 'errc true; print "RC=$?"')
+contains "RC=127" "$_out" "errc is gone"
 
 # ── 6. engine verbs that only read ────────────────────────────────────
 print "engine read-only verbs"
@@ -174,66 +148,41 @@ _out=$(cmd_out 'err list')
 contains "$FAKE_MODEL" "$_out" "err list finds the fake model"
 not_contains ".safetensors" "$_out" "err list prints ids only"
 
-_out=$(cmd_out 'err info mock-org/Fake-4bit')
-contains "Installed:  true" "$_out" "err info reports installation"
-contains "Size:" "$_out" "err info reports a size"
+_out=$(cmd_out 'err info --json; print "RC=$?"')
+# :11500 is machine-global: a live model (or none) is a valid answer, but the
+# shape must always be one of the two documented forms.
+if print -r -- "$_out" | grep -q '"model"'; then
+  contains '"base_url"' "$_out" "info --json names the base_url"
+elif print -r -- "$_out" | grep -q 'null'; then
+  ok "info --json is null when nothing serves :11500"
+else
+  fail "info --json reports the server or null" "$_out"
+fi
 
-_out=$(cmd_out 'err curated')
-contains "mlx-community/" "$_out" "err curated lists the bundled catalog"
+_out=$(cmd_out 'err download')
+contains "err download Hugging Face ID" "$_out" "err download offers the free-text id"
 
-_out=$(cmd_out 'err cache')
-# the launcher canonicalizes ERR_STATE_DIR (":A"), so /var -> /private/var
-_statedir_real=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$ERR_STATE_DIR")
-contains "$_statedir_real" "$_out" "err cache reports the state dir"
-contains "* = regenerable" "$_out" "err cache explains the regenerable marker"
+_out=$(cmd_out 'err cleanup')
+contains "err cleanup kv-cache" "$_out" "err cleanup lists the caches"
+[[ -d "$ERR_STATE_DIR" ]] && ok "listing the caches deleted nothing"
 
-_out=$(cmd_out 'err clean --all --dry-run')
-contains "dry run" "$_out" "err clean --dry-run refuses to delete"
-[[ -d "$ERR_STATE_DIR" ]] && ok "err clean --dry-run left the state dir alone"
+# One config file, in state, seeded from the template on first use.
+_cfgdir="$_TMP/cfgstate"
+_out=$(env -u ERR_CONF ERR_STATE_DIR="$_cfgdir" ERR_HUB_DIR="$_TMP/hub" \
+  zsh -c "source '$REPO/err-launcher.zsh'; err config" 2>&1)
+[[ -f "$_cfgdir/err.conf" ]] && ok "err config seeds \$ERR_STATE_DIR/err.conf" \
+  || fail "err config seeds \$ERR_STATE_DIR/err.conf" "$_out"
+grep -q '^temperature = ' "$_cfgdir/err.conf" 2>/dev/null \
+  && ok "the seeded config carries one shared temperature" \
+  || fail "the seeded config carries one shared temperature" "$(head -3 "$_cfgdir/err.conf" 2>/dev/null)"
+_out=$(env -u ERR_CONF ERR_STATE_DIR="$_cfgdir" ERR_HUB_DIR="$_TMP/hub" \
+  zsh -c "source '$REPO/err-launcher.zsh'; err config" 2>&1)
+contains "err.conf" "$_out" "err config names the file it opens"
 
-# :11500 is machine-global, so this adapts: on a host that already serves a
-# model the shape is asserted instead of the "nothing running" wording.
-if lsof -nP -iTCP:11500 -sTCP:LISTEN -t >/dev/null 2>&1; then
-  # A delete must be validated before it asks for confirmation.
 _out=$(cmd_out 'err remove no-such-org/nope-xyz; print "RC=$?"')
 contains "not installed" "$_out" "err remove rejects an uninstalled model"
 contains "RC=1" "$_out" "err remove exits 1 for an uninstalled model"
 not_contains "permanently?" "$_out" "err remove does not ask to confirm a no-op"
-
-_out=$(cmd_out 'err status --json; print "RC=$?"')
-  contains '"base_url"' "$_out" "status --json exposes a base_url"
-  contains '"model"' "$_out" "status --json exposes the model"
-  _out=$(cmd_out 'err endpoint; print "RC=$?"')
-  contains "http://127.0.0.1:11500/v1" "$_out" "err endpoint prints the base URL"
-else
-  # A delete must be validated before it asks for confirmation.
-_out=$(cmd_out 'err remove no-such-org/nope-xyz; print "RC=$?"')
-contains "not installed" "$_out" "err remove rejects an uninstalled model"
-contains "RC=1" "$_out" "err remove exits 1 for an uninstalled model"
-not_contains "permanently?" "$_out" "err remove does not ask to confirm a no-op"
-
-_out=$(cmd_out 'err status --json; print "RC=$?"')
-  contains "null" "$_out" "status --json is null when nothing serves :11500"
-  contains "RC=1" "$_out" "status --json exits 1 when nothing is running"
-  _out=$(cmd_out 'err endpoint; print "RC=$?"')
-  contains "no model running" "$_out" "err endpoint says when nothing is running"
-fi
-
-_out=$(cmd_out "err help | grep -m1 'err v0.601.0'")
-contains "err v0.601.0" "$_out" "err help prints the banner"
-check "$(cmd_out 'err help')" "$(cmd_out 'err -h')" "err help and err -h agree"
-
-# The README fenced block is the user-facing copy of `err help`. Drift here is
-# how a documented verb stops existing (or a new one stays invisible).
-_help=$(cmd_out 'err help' | sed '/^[[:space:]]*$/d')
-_readme=$(awk '/^err v0\.601\.0 \/\//{f=1} f{print} /stops offering it\.$/{f=0}' "$REPO/README.md" | sed '/^[[:space:]]*$/d')
-if [[ -z "$_readme" ]]; then
-  fail "README help block found" "no fenced block starting with 'err v0.601.0 //'"
-elif [[ "$_help" == "$_readme" ]]; then
-  ok "README help block matches err help"
-else
-  fail "README help block matches err help" "$(diff <(print -r -- "$_help") <(print -r -- "$_readme") | head -6)"
-fi
 
 # ── 7. a dead backend fails loudly, not silently ──────────────────────
 print "failure modes"

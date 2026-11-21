@@ -2,15 +2,16 @@
 
 `err` is two tools wearing one name:
 
-1. **explain / ask** — `err what` / `err why` (and the hidden `err wtf`),
-   `err "<question>"`, `errc <cmd>`, plus conversation sessions. Bare `err`
-   prints the help screen. Runs on the on-device Apple Foundation Model (`fm`), no API key.
-2. **model manager** — `err run|switch|default|stop|chat|list|curated|download|
-   remove|settings|info|cache|clean|endpoint|status|uninstall|tui`, carried over
+1. **explain / ask** — `err wtf`, `err "<question>"`, `cmd | err wtf`, plus
+   conversation sessions (`new` / `resume`). Bare `err` and `err -h` open the
+   interactive menu; `err help` is a prompt like any other non-verb. Runs on the
+   on-device Apple Foundation Model (`fm`), no API key.
+2. **model manager** — `err run|swap|stop|list|info|download|remove|config|
+   cleanup|uninstall|doctor` (plus hidden `version`/`ls`/`rm`), carried over
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
    on `:11500`.
 
-Version lives in `VERSION` (`0.601.0`). `CONTRACT.md` is the authoritative
+Version lives in `VERSION` (`0.602.0`). `CONTRACT.md` is the authoritative
 description of the seams between the three layers — read it before touching
 dispatch, env vars, or session storage.
 
@@ -18,25 +19,31 @@ dispatch, env vars, or session storage.
 
 | File | Role | Runs in |
 |---|---|---|
-| `err-launcher.zsh` | sourced by `~/.zshrc`; hooks, dispatch, `err`/`errc` | the user's interactive shell |
+| `err-launcher.zsh` | sourced by `~/.zshrc`; hooks, dispatch, the menu entry point | the user's interactive shell |
 | `err.py` | explain / ask / sessions / backends, stdlib only | a child `python3` |
 | `err-models.zsh` | the ported marv-mlx engine | a child `zsh` |
 | `lib/err-helpers.zsh` | engine helpers (`_err_*`), sourced only by the engine | that child |
-| `lib/err_repl.py` | the `err chat` REPL | a child `python3` |
 | `lib/err_moe/` | streaming-MoE server for models too big for RAM | a child `python3` |
 | `tests/` | `test_dispatch.zsh`, `test_err.py` + mock SSE server | CI / `make test` |
-| `install.sh` | uv + gum + mlx-vlm, then wires the launcher into `~/.zshrc` | the user |
+| `install.sh` | uv + mlx-vlm, then wires the launcher into `~/.zshrc` | the user |
 
 `err.conf` holds the explain/ask settings (prompts, `backend`, `port` for `fm`).
 The model-launch settings are a separate file, `$ERR_STATE_DIR/config.zsh`,
-written by `err settings`.
+hand-edited via `err config`.
 
 State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
 marv harness** — never write err's state there; the launcher's one-time migration
 only *reads* it. It holds
 `config.zsh`, `sessions/`, `chats/`, `logs/`, `apc/`, `run/` (per-shell scratch),
-`default-model`, `last-model`, `curated-llms.md`. Weights live in the HF hub
-cache, never there.
+`default-model`, `last-model`, `err-curator.md` (the curated catalog). Weights
+live in the HF hub cache, never there.
+
+**One config file.** `$ERR_STATE_DIR/err.conf` — flat `key = value`, seeded
+from the repo template, opened by `err config`. `config.zsh` is a legacy input:
+`_err_conf_seed` lifts its managed block and flag arrays into the new file once.
+Python and zsh read the same file, repeatable `server_flag` / `chat_flag` lines
+rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
+`err "<question>"` (they used to be two values in two files).
 
 ## Invariants — break these and the tool stops being err
 
@@ -50,12 +57,19 @@ cache, never there.
    `python3`, and that can be the CLT's 3.9. No new dependencies, no
    `match`, no `X | Y` annotations, no f-strings inside f-strings.
 3. **Data on stdout, diagnostics on stderr, exit codes 0/1/2.** The `--json`
-   shapes of `status`, `list`, `info`, `endpoint` and `curated` are consumed by
-   the pi extension and other clients — do not reshape them, extend them.
-4. **`err` with no arguments is the help screen.** It is not "explain" any
-   more: explaining needs the word (`what`/`why`/`wtf`), and even then only when
-   the word stands alone. `errc` calls `_err_explain` directly — routing it
-   through `err` would print help instead of explaining.
+   shapes of `info` and `list` are consumed by the pi extension and other
+   clients — do not reshape them, extend them. err's own action lines
+   (`arr // …`) are human-facing: they go to stdout, and the colour is dropped
+   when stdout is not a terminal.
+4. **`err` with no arguments opens the menu, and so does `err -h`.** The
+   engine owns the rows and the pickers (`_err_help_menu` in err-models.zsh);
+   it returns `<verb>\t<rest>` and the launcher re-dispatches it through `err`,
+   never `eval`, so the menu cannot drift from the typed command. Off a
+   terminal the engine prints the rows instead of a picker (`_err_help_rows`) —
+   that is what scripts and the tests see. The question and `wtf` lines are
+   shown in the header (`_err_help_header`) but are not pickable: the cursor's
+   first row is `err new` and cannot move above it. Explaining needs the word
+   (`wtf`).
 5. **Reserved verbs win over free text.** `err run` is the model verb, never the
    question "run". Documented in the help text; do not "fix" it.
 6. **The launcher must survive being sourced into someone else's shell.** No
@@ -77,10 +91,42 @@ cache, never there.
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
-- **One place starts `fm serve`.** `err.py:ensure_running` and the engine's
-  `_err_fm_start` both can; whoever starts it arms the idle watchdog via
-  `python3 err.py --watchdog <pid>`, and engine paths touch
-  `$ERR_STATE_DIR/fm_heartbeat` so a live server is never reaped.
+- **One model at a time.** `err runs` (extra servers on `:11501+`) is gone: a
+  second model replaces the first. Ports stay a contract — `run`/`swap` own
+  `:11500`.
+- **Every server err starts gets shut down again.** `err.py:ensure_running`
+  (fm) and the engine's `_err_arm_watchdog` (the MLX model on :11500) arm the
+  idle watchdog via `python3 err.py --watchdog <pid> [port]`, and
+  `err.py --watchdog-run` is that detached loop. Heartbeats are per server:
+  `$ERR_STATE_DIR/fm_heartbeat` for fm, `mlx_heartbeat-<port>` for MLX. Never
+  arm a watchdog
+  from a read-only query (`err info` is polled by clients — it would keep
+  every model awake forever).
+- **Two system prompts, and they are opposite on purpose.** The question prompt
+  asks for a fenced example (that block is what feeds `_ERR_SUGGEST_FILE`); the
+  explain prompt forbids one (`err wtf` must never put a command in history).
+  Each has exactly one definition, in `err.py` (`DEFAULT_SYSTEM_PROMPT` /
+  `DEFAULT_QUESTION_PROMPT`); `err.conf` overrides without restating, and
+  `effective_prompt()` owns the precedence (`explain_system_prompt` → legacy
+  `system_prompt` → builtin). `err doctor` shows what is in force via
+  `err.py --prompt explain|question` (`origin<TAB>text`) — if you add a prompt,
+  wire it into that flag, not into a second parser in zsh.
+- **A plain command's stdout is never captured, and must not be.** `preexec`/
+  `precmd` bracket a command but its bytes go straight to the tty; the only
+  in-shell trick is `exec > >(tee …)`, which makes fd 1 a pipe for the whole
+  run — colours, pagers and full-screen programs break. Output reaches the
+  model only through `cmd | err wtf` (`_ERR_STDIN_PIPED`, err.py reads its own
+  stdin). `errc` is gone: it teed both streams, and the tee is exactly the pipe
+  that breaks full-screen programs. `_err_fresh` gives the question path its
+  context for exactly one turn. If you are tempted
+  to add transparent capture, it is Atuin's pty-proxy — a whole-shell relay,
+  not a hook.
+- **Watchdog pids must be the listener, not `$!`.** `mlx_vlm.server` is a uv
+  shim that spawns the real server as a child, so SIGTERM to `$!` leaves the
+  model (and its RAM) behind. `_err_arm_watchdog` resolves the pid with
+  `lsof -iTCP:<port> -sTCP:LISTEN -t` and falls back to the launched pid. The
+  engine's fm path had the same shape of bug harder: it passed an unset `pid`,
+  so the watchdog was never armed at all.
 - **Quotes in an associative-array subscript are part of the key.** `M["$k"]=v`
   stores the key `"v"` *with quotes*; `${M[$k]}` then misses. This silently
   broke **every** menu selection for a while (rows rendered, choice discarded,
@@ -93,17 +139,15 @@ cache, never there.
   Sending it to the :11500 server makes mlx-vlm try to download a repo named
   `system`. `mlx_model_id()` resolves the served model from `last-model` /
   `default-model`, so the manager and the explain layer cannot drift again.
-- **Ports are a contract.** `err run`/`err switch` own `:11500` (every client,
-  including err's own `backend = mlx`, reads that). `err runs` takes the next
-  free port from `:11501` and must never move or stop the `:11500` server.
-  `status --json` and `endpoint` deliberately ignore the extra servers.
+- **Ports are a contract.** `err run`/`err swap` own `:11500` (every client,
+  including err's own `backend = mlx`, reads that). `status --json` and
+  `endpoint` were folded into `err info` / `info --json`.
 - **The chosen model must reach the explain layer.** `err default` / `err switch`
   write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from
   `fm` while the menu shows another model as default — that was a real bug.
-  `err switch` must also write `default-model`, not just `last-model`: switch is
-  a move, and a pick that only lives in `last-model` reads as "it went back to
-  the previous model" on the next call.
+  There is no `err default` any more: `last-model` *is* the default, and
+  `run`/`swap` write it.
 - **Starting :11500 is err.py's job.** When `backend = mlx` and the server is
   down, err.py runs the hidden engine verb `ensure <model>` (stop every err
   server, start the chosen model) instead of printing "start it with `err run`".
@@ -118,6 +162,11 @@ cache, never there.
 - **Do not key sessions by PID.** macOS recycles pids; a fresh tab could inherit
   a dead tab's conversation. Sessions carry a uuid, and pid/tty are only
   informational.
+- **The picker paints on stderr and reads the keyboard from stdin,** exactly
+  like the picker reads stdin. Drawing on stdout would be captured by
+  `pick=$(...)`; reading keys from a separately opened `/dev/tty` does not put
+  the terminal in raw mode, so arrows arrive only after Enter and the menu looks
+  frozen (`read -u` looks fine on a pty, which is how it slipped through once).
 - **Markers in menus must be one column wide.** `★` and friends are East Asian
   wide and shift every row under them; the default marker is ASCII `* ` with
   `  ` for everything else.
@@ -130,7 +179,7 @@ cache, never there.
 make lint    # zsh -n on the three .zsh files, py_compile on err.py
 make test    # dispatch  hooks/dispatch, both engines stubbed
              # err.py    explain/ask/sessions against a mock SSE server
-             # menus     the real picker code driven by a fake `gum`
+             # menus     the real picker code, off a terminal and under a pty
              # smoke     real launcher + err.py + engine dispatch, end to end
 ```
 
@@ -151,39 +200,44 @@ dispatch routing for every verb, the preexec guard, unquoted `?`, explain and
 ask message construction, session round-trip, redaction, token accounting,
 `resume` listing, `new` writing `_ERR_SESSION_ID_FILE`.
 
-**Not covered automatically:** anything that needs a real terminal (the gum
-menus, `err tui`, `err chat`) or real weights (`err run`). To exercise a menu
-non-interactively, put a fake `gum` on `PATH` that dumps stdin and exits 1 — the
-real picker code then runs and the rows are visible:
+**Not covered automatically:** anything that needs a real terminal (the
+interactive menus) or real weights (`err run`). Every
+menu prints its rows and aborts when it is off a terminal, so the rows are
+visible from a pipe. Under a pty, `ERR_PICK_DUMP=1` makes the picker do the
+same instead of waiting for keys (that is the seam `tests/menu.zsh` uses):
 
 ```sh
-mkdir -p /tmp/fakebin && printf '#!/bin/sh\ncase "$1" in choose) cat >&2; exit 1;; *) exit 0;; esac\n' > /tmp/fakebin/gum
-chmod +x /tmp/fakebin/gum
-PATH=/tmp/fakebin:$PATH zsh ./err-models.zsh run
+zsh ./err-models.zsh run                        # rows on stderr
+ERR_PICK_DUMP=1 script -q /dev/null zsh ./err-models.zsh run
 ```
+
+`_err_input` has the same idea: `ERR_TEST_INPUT=value` answers a prompt without
+a terminal.
 
 Manual smoke that does need the real model:
 
 ```sh
 zsh -f -i    # then: source ./err-launcher.zsh
-             # err what is a glob?      -> answer + suggested command
+             # err wtf                   -> explains the last command
              # err and why does it matter?  -> turn 2, history included
-             # err resume                -> session list
+             # err resume                -> session picker
 ```
 
-`err status` and `err run apple-fm` start `fm serve`; `err stop apple-fm` or
-`pkill -f 'fm serve'` cleans up. The `fm` server has its own idle watchdog
-(`err.conf` → `idle_timeout_minutes`).
+`err info` and `err run apple-fm` start `fm serve`; `err stop apple-fm` or
+`pkill -f 'fm serve'` cleans up. Every server err starts has an idle watchdog
+(`err.conf` → `idle_timeout_minutes`): fm via `fm_heartbeat`, each MLX server via
+`mlx_heartbeat-<port>`, plus live connections to the port and the server's own
+CPU time. `tests/test_err.py` covers both halves (reaped / spared) with a
+sub-second timeout and `ERR_WATCHDOG_POLL`.
 
 ## Release checklist
 
 1. Bump `VERSION` (and `CHANGELOG.md`).
 2. `make lint test`.
-3. Check the update-check URL in `_err_check_update` points at this repo's
-   `VERSION` on `main` (`raw.githubusercontent.com/pavsefcik/err/main/VERSION`).
-4. Help text lives in **one** place: `_err_help()` in `err-launcher.zsh`. The
-   README block must match it character for character — diff them.
-5. `install.sh` must stay idempotent (re-runnable), must never duplicate the
+3. Help text lives in **one** place: `_err_help_rows()` in `err-models.zsh`
+   (the menu rows come from the same list). The README block mirrors it —
+   diff them by hand, the smoke test no longer pins it.
+4. `install.sh` must stay idempotent (re-runnable), must never duplicate the
    `~/.zshrc` line, and must not require Rust, Xcode CLT or Homebrew.
 
 ## Deliberately out of scope
@@ -191,7 +245,7 @@ zsh -f -i    # then: source ./err-launcher.zsh
 - The **marv** harness (agent loop, tools, TUI) — a different tool, left where
   it was.
 - The **marv-mlx pi extension** (`extensions/marv-mlx.ts`, `/marv-mlx-setup`,
-  `/marv-mlx-sync`) — not ported. `err endpoint`/`err status` still expose what
+  `/marv-mlx-sync`) — not ported. `err info` still exposes what
   such an integration would need.
 - The marv-mlx **chat-history TUI** — replaced by the session verbs
   (`new` / `clear` / `resume` / `delete`).
