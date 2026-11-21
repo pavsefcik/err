@@ -1619,9 +1619,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       return 0
     fi
     p=$(_err_cleanup_path "$kind")
-    [[ -e "$p" ]] || { print -r -- "0B"; return 0 }
-    local n; n=$(du -sh "$p" 2>/dev/null | awk '{print $1}')
-    print -r -- "${n:-?}"
+    # One formatter for every row: `du -sh` says `0B`/`4.0K` while
+    # _err_fmt_bytes says `0 B`/`4.0 KiB`, and mixing them in one menu looked
+    # broken. _err_du_bytes also handles a missing directory as 0.
+    _err_fmt_bytes "$(_err_du_bytes "$p")"
   }
 
   _err_headless_cleanup() {
