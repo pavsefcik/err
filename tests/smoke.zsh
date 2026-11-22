@@ -81,6 +81,7 @@ _out=$(cmd_out 'err')
 contains "err new"           "$_out" "bare err shows the menu rows"
 contains "err run <model>"   "$_out" "the menu lists err run"
 contains "err cleanup"       "$_out" "the menu lists err cleanup"
+contains "err record"        "$_out" "the menu lists err record"
 not_contains "err settings"  "$_out" "err settings is gone (one config file)"
 not_contains "err status"    "$_out" "err status folded into info"
 not_contains "err chat"      "$_out" "err chat is gone"
@@ -115,13 +116,8 @@ last_has() { # $1 needle
 }
 last_dump() { head -c 500 "$_TMP/port.last" 2>/dev/null }
 
-# ── 3. the model gets what a command printed (the one surviving pipe) ──
+# ── 3. the model gets what a command printed ──
 print "captured output"
-_out=$(int_sh 'print "PIPED_MARKER_42" | err wtf')
-contains 'print "PIPED_MARKER_42"' "$_out" "piped err wtf explains the producing command"
-not_contains "| err wtf" "$_out" "the | err stage is not recorded as the command"
-last_has "PIPED_MARKER_42" && ok "piped output reached the model" \
-  || fail "piped output reached the model" "last request: $(last_dump)"
 
 _out=$(int_sh 'print "CTX_MARKER_9" >/dev/null; err "what just happened" >/dev/null')
 last_has "the command I just ran" && ok "a question carries the last command as context" \
@@ -135,13 +131,9 @@ contains "A glob matches filenames." "$_out" "err still answers after a round-tr
 
 # ── 5. guard rails ─────────────────────────────────────────────────────
 print "guard rails"
-# A dropped verb is no longer reserved, so `err runs` is just a question now.
 _out=$(cmd_out '_err_last_cmd=""; _err_consumed=1; err wtf; print "RC=$?"')
 contains "no command to explain." "$_out" "err wtf with nothing recorded explains that"
 contains "RC=1" "$_out" "err wtf exits 1 when there is nothing to explain"
-
-_out=$(cmd_out 'errc true; print "RC=$?"')
-contains "RC=127" "$_out" "errc is gone"
 
 # ── 6. engine verbs that only read ────────────────────────────────────
 print "engine read-only verbs"
@@ -179,6 +171,17 @@ grep -q '^temperature = ' "$_cfgdir/err.conf" 2>/dev/null \
 _out=$(env -u ERR_CONF ERR_STATE_DIR="$_cfgdir" ERR_HUB_DIR="$_TMP/hub" \
   zsh -c "source '$REPO/err-launcher.zsh'; err config" 2>&1)
 contains "err.conf" "$_out" "err config names the file it opens"
+
+# err reset puts the shipped config back and keeps the old file as .bak.
+_rconf="$_TMP/reset/err.conf"; mkdir -p "$_TMP/reset"
+print "model_id = hand-edited" > "$_rconf"
+_out=$(ERR_CONF="$_rconf" zsh "$REPO/err-models.zsh" reset -y 2>&1)
+grep -q '^explain_system_prompt = You explain' "$_rconf" \
+  && ok "err reset restores the shipped prompts" \
+  || fail "err reset restores the shipped prompts" "$_out"
+grep -q 'hand-edited' "$_rconf.bak" 2>/dev/null \
+  && ok "err reset keeps the old file as .bak" \
+  || fail "err reset keeps the old file as .bak" "$_out"
 
 _out=$(cmd_out 'err remove no-such-org/nope-xyz; print "RC=$?"')
 contains "not installed" "$_out" "err remove rejects an uninstalled model"

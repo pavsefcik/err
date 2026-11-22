@@ -15,7 +15,7 @@ on inside the tool env itself so foreign launches are covered too.
 
 Semantics: ``setdefault`` only — any value already in the environment wins.
 Opt out entirely by setting ``APC_ENABLED=0`` or ``ERR_APC=0`` in the
-launching environment (e.g. in ``~/.cache/err/config.zsh``).
+launching environment (e.g. in ``~/.cache/err/err.conf``).
 
 This file must stay silent (no stdout/stderr writes): other console scripts in
 this env (mlx_vlm.chat, mlx_vlm.convert, ...) import it as well.

@@ -25,7 +25,7 @@ The installer is idempotent and safe to re-run. It treats the source directory a
 2. warns — but does not abort — when `fm` is missing;
 3. installs `uv` (Astral's standalone installer) only if missing — there is no other binary to download;
 4. runs `uv tool install mlx-vlm --with jinja2` only if `mlx_vlm.server` is missing;
-5. adds uv's bin directory to `PATH` in `~/.zshrc` and sources `err-launcher.zsh` there — each line appended at most once, and printed before it is written.
+5. adds uv's bin directory to `PATH`, prepends the opt-in PTY startup hook, and sources `err-launcher.zsh` in `~/.zshrc` — wiring is idempotent.
 
 Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.command` only wires the launcher; `install.sh` is the full install.
 
@@ -53,7 +53,9 @@ Available commands:
        err download <model>   download model(s)
        err remove <model>     remove model(s)
        err config             edit the config file
+       err reset              restore the shipped config (old one kept as .bak)
        err cleanup            clear cached state
+       err record             show the last command and output
        err uninstall          remove err
        err doctor             check the install
 ```
@@ -72,22 +74,24 @@ question that starts with one needs quoting: `err 'why did that fail?'`.
 
 ## Explain & ask
 
-After any command, `err wtf` explains what it did — and, if it failed, what to
-try instead. `err <question>` asks a shell or general question; `err new` and
-`err resume` manage the conversation that keeps follow-ups in context.
+After a command, `err wtf` explains what it did — and, if it failed, why.
+`err <question>` answers technical or non-technical questions, with follow-ups
+kept in context by `err new` and `err resume`. `err record` shows the last
+command and captured output without contacting the model.
 
-**Output reaches the model two ways.** Pipe it (`ps aux | err wtf`): err reads
-its own stdin and knows the producing command. Or set `capture = on` in
-`err.conf`: err then tees each command's stdout+stderr (last 40 lines) so a
-following `err wtf` or question can see it. Capture makes fd 1 a pipe while the
-command runs, so colours, pagers and full-screen programs (less, vim, btop,
-ssh) break — that is why it is opt-in. Question mode attaches the last command
-and its output as context for exactly one turn.
+**Output reaches the model from PTY capture.** Set `capture = pty` in `err config`
+and open a new terminal shell. Commands keep a real TTY while err records the
+last command's output for the next question or explanation. Alternate-screen
+programs (such as vim, less and htop) are excluded. If `ERR_STATE_DIR` or
+`ERR_CONF` is set in `~/.zshrc`, place the startup-hook source after that
+assignment (or set `ERR_CAPTURE=pty` in the environment). The shipped config
+enables PTY capture; set `capture = off` to disable it. Legacy `capture = on`
+is ignored.
 
-```sh
-ps aux | err wtf
-git status | err wtf
-```
+In interactive zsh, unescaped `!` triggers history expansion outside single
+quotes, including inside double quotes. For example, use `echo 'Greetings!'`,
+not `echo "Greetings!"`. err also sanitizes suggested commands before they
+reach shell history; suggestions are never executed automatically.
 
 The explain layer is configured in the config file (`err config`): `backend = fm`
 uses the on-device Apple Foundation Model, `backend = pcc` uses Private Cloud
@@ -120,15 +124,15 @@ print how to start a model instead.
 
 ### Quoting
 
-`err` is a normal shell function, not a `noglob` alias, so your shell parses the question first. An unquoted `?` now works, but quote the argument when it contains any of `' " ( ) ; | & < > !`:
+The launcher uses `noglob` so an unquoted `?` does not expand as a filename pattern. Other shell syntax is still parsed before err runs; quote the question when it contains characters such as `' " ( ) ; | & < > !`:
 
 ```sh
 err "what does 'set -e' do?"
 err 'why did (my subshell) exit 1?'
 ```
 
-`err` is `noglob`-aliased, so an unquoted `?` in a question does not blow up —
-but syntax characters (`|`, `>`, `;`) are parsed before any alias can help.
+Syntax characters such as `|`, `>` and `;` are parsed by zsh before err runs,
+so quote them as part of the question.
 
 ## Models
 

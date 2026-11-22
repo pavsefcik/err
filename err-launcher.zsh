@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# err 0.601 — shell shim: hooks, dispatch, per-shell facts.
+# err 0.602 — shell shim: hooks, dispatch, per-shell facts.
 # Add to ~/.zshrc:  source "/path/to/err-launcher.zsh"
 #
 # Two engines behind one command:
@@ -16,13 +16,22 @@ export _ERR_DIR
 ERR_STATE_DIR="${ERR_STATE_DIR:A}"      # absolute, ~ expanded, no trailing /
 export ERR_STATE_DIR
 
+# Keep the random boundary token in the shell, but never export it to commands
+# being captured (otherwise a command could forge its own end marker).
+if [[ "${ERR_PTY_PROXY_ACTIVE:-0}" == 1 ]]; then
+  typeset -g ERR_PTY_TOKEN="${ERR_PTY_TOKEN:-}"
+  typeset +x ERR_PTY_TOKEN
+fi
+
+# PTY capture startup is handled by ~/.zshrc, never while sourcing this file.
+
 # One-time move of err's state out of the old shared marv-mlx root. Only err's
 # own files come across: apc/, logs/ and venvs/ are regenerable and stay behind
 # with marv. Runs once, guarded by the new directory not existing yet.
 if [[ ! -e "$ERR_STATE_DIR" && -d "$HOME/.cache/marv/mlx" ]]; then
   (
     mkdir -p "$ERR_STATE_DIR" 2>/dev/null
-    for _p in config.zsh sessions default-model last-model; do
+    for _p in sessions last-model; do
       [[ -e "$HOME/.cache/marv/mlx/$_p" ]] && \
         cp -R "$HOME/.cache/marv/mlx/$_p" "$ERR_STATE_DIR/$_p" 2>/dev/null
     done
@@ -57,7 +66,9 @@ _ERR_TOKENS_FILE="${_ERR_RUN_DIR}/tokens.$$"
 _ERR_TURNS_FILE="${_ERR_RUN_DIR}/turns.$$"
 _ERR_SUGGEST_FILE="${_ERR_RUN_DIR}/suggest.$$"
 _ERR_STDERR_FILE="${_ERR_RUN_DIR}/stderr.$$"
-_ERR_STDOUT_FILE="${_ERR_RUN_DIR}/stdout.$$"
+_ERR_STDOUT_FILE="${ERR_PTY_CAPTURE_FILE:-${_ERR_RUN_DIR}/stdout.$$}"
+# The destination is needed by err.py only; captured programs must not inherit it.
+typeset +x ERR_PTY_CAPTURE_FILE
 : > "$_ERR_SESSION_FILE"
 : > "$_ERR_TOKENS_FILE"
 : > "$_ERR_TURNS_FILE"
@@ -94,47 +105,9 @@ typeset -g _ERR_TURNS="${_ERR_TURNS:-0}"
 typeset -g _ERR_TOKENS="${_ERR_TOKENS:-0}"
 typeset -g _ERR_RPROMPT_OWNED="${_ERR_RPROMPT_OWNED:-0}"
 
-# ── optional terminal capture ─────────────────────────────────────────
-# `capture = on` in err.conf tees the command's stdout+stderr to
-# _ERR_STDOUT_FILE for the duration of that command, so err can hand the model
-# what it printed. fd 1 becomes a pipe while a command runs: colours, pagers
-# and full-screen programs break. That is why this is opt-in (see AGENTS.md).
-_err_capture_mode() {
-  local v="${ERR_CAPTURE:-}" f
-  if [[ -z "$v" ]]; then
-    f="${ERR_CONF:-$ERR_STATE_DIR/err.conf}"
-    [[ -r "$f" ]] && v=$(grep -E '^[[:space:]]*capture[[:space:]]*=' "$f" 2>/dev/null \
-      | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
-  fi
-  case "${v:l}" in (1|on|yes|true|all) return 0 ;; esac
-  return 1
-}
-
-typeset -g _ERR_CAPTURE_ON=0
-_err_capture_mode && _ERR_CAPTURE_ON=1
-# Save the real terminal fds once; capture restores them after every command.
-if (( _ERR_CAPTURE_ON )) && [[ -o interactive && -t 1 ]] \
-   && [[ -z "${_ERR_TTY_OUT:-}" ]]; then
-  exec {_ERR_TTY_OUT}>&1
-  exec {_ERR_TTY_ERR}>&2
-fi
-
-# Start/stop is bracketed by preexec/precmd. `tee` inherits the terminal as
-# its stdout, so the command still prints normally while the file fills.
-typeset -g _ERR_CAPTURE_ACTIVE="${_ERR_CAPTURE_ACTIVE:-0}"
-_err_capture_start() {
-  (( _ERR_CAPTURE_ON )) || return 0
-  [[ -n "${_ERR_TTY_OUT:-}" && -t 1 ]] || return 0
-  _ERR_CAPTURE_ACTIVE=1
-  exec > >(tee "$_ERR_STDOUT_FILE") 2>&1
-  return 0
-}
-_err_capture_stop() {
-  (( ${_ERR_CAPTURE_ACTIVE:-0} )) || return 0
-  _ERR_CAPTURE_ACTIVE=0
-  exec >&"$_ERR_TTY_OUT" 2>&"$_ERR_TTY_ERR" 2>/dev/null || true
-  return 0
-}
+# In the proxy child shell, hooks emit output-boundary markers.
+# The legacy `capture = on` tee mode is intentionally disabled.
+_err_capture_mode() { [[ "${ERR_PTY_PROXY_ACTIVE:-0}" == 1 ]] }
 
 # When this shell loaded the launcher. Used to spot a stale in-memory `err`
 # after the file changed on disk — `switch`/`help` live here, so a stale copy
@@ -210,7 +183,7 @@ _err_help_interactive() {
 _err_engine_verbs=(
   # model manager (every `case` arm in err-models.zsh that a user can type)
   swap switch run serve stop doctor
-  list ls download remove rm config info cleanup
+  list ls download remove rm config reset info cleanup
   uninstall ensure
 )
 
@@ -234,7 +207,7 @@ _err_py() {
     print -u2 "err: python3 not found"
     return 1
   fi
-  rm -f "$_ERR_SUGGEST_FILE" 2>/dev/null
+  [[ "${1:-}" == --record ]] || rm -f "$_ERR_SUGGEST_FILE" 2>/dev/null
   _ERR_SESSION_ID="$_ERR_SESSION_ID" \
   _ERR_SESSION_ID_FILE="$_ERR_SESSION_FILE" \
   _ERR_TOKENS_FILE="$_ERR_TOKENS_FILE" \
@@ -242,7 +215,6 @@ _err_py() {
   _ERR_SUGGEST_FILE="$_ERR_SUGGEST_FILE" \
   _ERR_STDERR_FILE="$_ERR_STDERR_FILE" \
   _ERR_STDOUT_FILE="$_ERR_STDOUT_FILE" \
-  _ERR_STDIN_PIPED="${_err_stdin_piped:-0}" \
     "$py" "$_ERR_DIR/err.py" "$@"
   local rc=$?
 
@@ -308,7 +280,6 @@ _err_last_exit=0
 _err_skip_exit=0     # set while err itself runs, so its $? can't clobber ours
 _err_consumed=0      # set once explained, so a second `err` doesn't repeat it
 _err_fresh=0         # 1 while the last command has not been talked about yet
-_err_stdin_piped=0   # 1 when the pending command line ends in `| err …`
 
 # Is this command line one of ours? `err` is aliased to `noglob err`, so the
 # line preexec sees carries that prefix — matching only "err" would let an err
@@ -319,41 +290,40 @@ _err_is_ours() {
   [[ "$c" == (err|err\ *) ]]
 }
 
+typeset -g _ERR_PTY_COMMAND_ACTIVE=0
 _err_preexec() {
-  # Reset first: a stale flag (or a stale pipe) must never describe this line.
-  _err_stdin_piped=0
+  _ERR_PTY_COMMAND_ACTIVE=0
   # $1 is empty when zsh runs the hook outside an interactive command line
   # (scripts, some plugin managers) — never let that wipe the real record.
   [[ -z "${1:-}" ]] && return
   _err_is_ours "$1" && return
   local c="$1"
-  # `ps aux | err wtf`: err is the LAST stage, not the first, so _err_is_ours
-  # misses it and the whole pipeline would become "the command". Record the
-  # producing side instead, and remember that err's stdin is that pipe —
-  # err.py reads it rather than explaining a command it never saw.
+  # A pipeline ending in `| err …` is err reading some other command's output.
+  # err is the LAST stage, so _err_is_ours misses it: check the tail here and
+  # record nothing, or the whole pipeline would become "the command".
   if [[ "$c" == *"|"* ]]; then
     local tail="${c##*|}"
     tail="${tail#"${tail%%[^[:space:]]*}"}"
-    if _err_is_ours "$tail"; then
-      c="${c%|*}"
-      c="${c%"${c##*[^[:space:]]}"}"
-      _err_stdin_piped=1
-    fi
+    _err_is_ours "$tail" && return
   fi
   _err_last_cmd="$c"
   _err_consumed=0
   _err_fresh=1
-  # Nothing is captured for a plain command unless `capture = on`; either way
-  # the previous command's capture must not be read as this one's.
+  # Clear prior output; the PTY relay repopulates it between this command's markers.
   : >| "$_ERR_STDOUT_FILE" 2>/dev/null
   : >| "$_ERR_STDERR_FILE" 2>/dev/null
-  _err_capture_start
+  if _err_capture_mode; then
+    _ERR_PTY_COMMAND_ACTIVE=1
+    print -rn -- $'\e]18188736;'"${ERR_PTY_TOKEN}"$';S\a'
+  fi
 }
 
 _err_precmd() {
   local ret=$?
-  # Restore the terminal before anything (prompt included) can write.
-  _err_capture_stop
+  if _err_capture_mode && (( _ERR_PTY_COMMAND_ACTIVE )); then
+    print -rn -- $'\e]18188736;'"${ERR_PTY_TOKEN}"$';E\a'
+    _ERR_PTY_COMMAND_ACTIVE=0
+  fi
   if (( _err_skip_exit )); then
     _err_skip_exit=0
     return
@@ -368,7 +338,9 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
   # Guard against duplicate hooks when the launcher is re-sourced.
   (( ${preexec_functions[(I)_err_preexec]} )) || preexec_functions+=(_err_preexec)
   if (( ! ${precmd_functions[(I)_err_precmd]} )); then
-    precmd_functions=(_err_precmd ${precmd_functions[@]})
+    # End capture after other precmd integrations, immediately before zsh draws
+    # the prompt, so their prompt decorations are not mistaken for command output.
+    precmd_functions+=(_err_precmd)
   fi
 elif [[ -n "${BASH_VERSION:-}" ]]; then
   trap 'if [[ "$BASH_COMMAND" != "err" ]]; then _err_last_cmd="$BASH_COMMAND"; _err_consumed=0; fi' DEBUG
@@ -387,13 +359,23 @@ unalias err 2>/dev/null || true
 err() {
   local last_cmd="$_err_last_cmd"
   local last_exit="$_err_last_exit"
+  local verb="${1:-}"
+
+  # Read-only inspection does not consume the one-turn command context.
+  if [[ "$verb" == record && $# == 1 ]]; then
+    _ERR_LAST_CMD="$last_cmd"
+    _ERR_LAST_EXIT="$last_exit"
+    export _ERR_LAST_CMD _ERR_LAST_EXIT
+    _err_skip_exit=1
+    _err_py --record
+    return $?
+  fi
+
   # Snapshot before anything can consume it: the ask path uses it as context,
-  # and *any* err call means the command is no longer "the one just run".
+  # and *any* ordinary err call means the command is no longer "the one just run".
   local fresh=$_err_fresh
   _err_fresh=0
   _err_skip_exit=1
-
-  local verb="${1:-}"
 
   # ---- no arguments: the interactive menu ----
   if (( $# == 0 )); then
@@ -437,26 +419,26 @@ err() {
     wtf)
       if (( $# == 1 )); then
         _err_explain "$last_cmd" "$last_exit"
-        return $?
+        local rc=$?
+        (( rc == 0 || ! fresh )) || _err_fresh=1
+        return $rc
       fi
       ;;
   esac
 
   # ---- ask a question ----
-  # A pipeline ending in `| err <question>` hands err the producer's OUTPUT,
-  # never its exit status — don't present a stale $? as this command's.
-  [[ ${_err_stdin_piped:-0} == 1 ]] && last_exit=-1
   _ERR_LAST_CMD="$last_cmd"
   _ERR_LAST_EXIT="$last_exit"
   _ERR_LAST_FRESH="$fresh"
   export _ERR_LAST_CMD _ERR_LAST_EXIT _ERR_LAST_FRESH
   _err_py --ask "$@"
   local rc=$?
+  if (( rc != 0 && fresh )); then _err_fresh=1; fi
   (( rc == 0 )) && _err_update_rprompt
   return $rc
 }
 
-# Explain the last command (`err wtf`), and the pipe target (`cmd | err wtf`).
+# Explain the last command (`err wtf`).
 _err_explain() {
   local last_cmd="$1"
   local last_exit="$2"
@@ -481,14 +463,10 @@ _err_explain() {
     return 1
   fi
 
-  # Consume the record so a second `err what` doesn't repeat it.
+  # Consume the record so a second `err wtf` doesn't repeat it.
   _err_last_cmd=""
   _err_consumed=1
   _err_fresh=0
-
-  # `ps aux | err wtf` was handed the producer's output, not its status: the
-  # exit code err could read here belongs to an earlier command line.
-  (( ${_err_stdin_piped:-0} )) && last_exit=-1
 
   _ERR_LAST_CMD="$last_cmd"
   _ERR_LAST_EXIT="$last_exit"
@@ -496,6 +474,11 @@ _err_explain() {
   export _ERR_LAST_CMD _ERR_LAST_EXIT _ERR_LAST_FRESH
   _err_py
   local rc=$?
+  if (( rc != 0 )); then
+    _err_last_cmd="$last_cmd"
+    _err_last_exit="$last_exit"
+    _err_consumed=0
+  fi
   (( rc == 0 )) && _err_update_rprompt
   return $rc
 }

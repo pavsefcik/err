@@ -6,7 +6,7 @@
 # "mlx-community/Qwen3-8B-Instruct" instead of a generic "Python 3.1x", which
 # makes it obvious which model a running server belongs to.
 #
-# err launches the server / chat REPL with:
+# err launches the server with:
 #   ERR_PROCTITLE=<model-id> PYTHONPATH=<directory containing this file> ...
 #
 # The rename is silent and best-effort: if the `setproctitle` package isn't

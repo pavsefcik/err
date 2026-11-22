@@ -3,9 +3,32 @@
 All notable changes to err are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.602.0] - 2026-11-22
 
 ### Changed
+
+- **Config simplified.** `err.conf` is the only config file: `thinking` is its
+  first line, `config.zsh` and `default-model` are gone (`last-model` is the
+  default), the `chat_flag` / `chat_system_prompt` keys and their engine arrays
+  are removed (the `err chat` verb they served is gone). `temperature` and
+  `max_tokens` are read by err.py, and `max_tokens` also reaches the server.
+  Old confs still load; missing keys are appended.
+- **The explain and question prompts are in `err.conf` only**, editable with
+  `err config`. `err.py` has no built-in copy: a missing or empty prompt key
+  makes err refuse to answer and point at `err reset`.
+- **`err reset [-y]`** restores the shipped `err.conf`; the old file is kept as
+  `err.conf.bak`.
+- **Piped input is gone.** `cmd | err wtf` is no longer recorded or read; output
+  reaches the model only through `capture = pty`. The `_ERR_STDIN_PIPED` flag is
+  removed.
+- **Legacy keys are no longer read or upgraded:** `system_prompt` and the
+  older-config key appends.
+- **Prompts are leaner and more useful.** Explain answers use a few sentences;
+  questions are open to technical and non-technical topics; exit-status suffixes
+  ask for slightly fuller answers.
+- **Suggested commands are made zsh-safe.** Literal double-quoted `!` text is
+  converted to single quotes where safe; other unquoted/double-quoted `!`
+  characters are escaped before the suggestion reaches shell history.
 
 - **The main menu shows its typed-only commands.** `err 'question'` and
   `err wtf` now appear above the pickable rows under an `Available commands:`
@@ -73,18 +96,21 @@ All notable changes to err are documented here. Format follows
 
 ### Added
 
-- **Optional terminal capture: `capture = on`.** err tees each command's
-  stdout+stderr into `_ERR_STDOUT_FILE` for the duration of that command and
-  restores the terminal fds in `precmd`, so the next `err wtf` / question sees
-  what the command printed (last 40 lines, 3000 chars). It is off by default
-  because fd 1 is a pipe while a command runs: colours, pagers and full-screen
-  programs break. The prompts now say err sees captured or piped output, so a
-  model no longer claims ignorance or invents terminal contents. Existing
-  `err.conf` files gain the new keys (`capture`, `apc_total_gb`,
-  `apc_max_age_days`) on the next load, so `err config` shows them.
+- **Opt-in PTY terminal capture: `capture = pty`.** A PTY relay surrounds the
+  interactive shell, preserving TTY behavior while recording bounded command
+  output for the next question or explanation. Private OSC markers delimit
+  commands; alternate-screen TUIs are excluded. The shipped config enables
+  capture; set `capture = off` to disable it. Legacy `capture = on` is ignored
+  because the old pipe/tee mode broke TTY apps.
+- **`err record` shows what err has recorded.** It prints the latest command,
+  exit code and captured output locally, without contacting the model or
+  consuming the one-turn context.
 
 ### Fixed
 
+- **A transient health probe could undo a successful MLX autostart.** Once the
+  engine's `ensure` succeeds, err now uses the existing bounded readiness wait
+  instead of failing on a second instantaneous probe.
 - **`err run` picked the Apple model and downloaded it from Hugging Face.**
   `_err_headless_run` tested for `apple-fm` only on an explicit argument, then
   fell through to the repo-download path for a picked one. The check now runs
@@ -161,9 +187,8 @@ All notable changes to err are documented here. Format follows
   the typed command. Rows that need an argument open a picker (installed
   models, the curated catalog) or a text field (a question); `apple-fm` is
   excluded from `err remove`. Off a terminal the same rows print as text.
-- **The vocabulary shrank to what the menu shows.** Removed: `errc` (it was the
-  `tee` pipe that breaks full-screen programs — `cmd | err wtf` is the one way
-  in), `what`/`why` (`err wtf` survives), `status`/`endpoint` (folded into
+- **The vocabulary shrank to what the menu shows.** Removed several legacy
+  command wrappers and aliases; `what`/`why` (`err wtf` survives), `status`/`endpoint` (folded into
   `err info`), `cache`/`clean` (`err clear-cache`), `settings` (`err config`),
   `default` (the last model you ran *is* the default), `switch` (`swap`),
   `clear` (`new`), `delete` (`err clear-cache sessions`), `runs` (one model at
@@ -203,24 +228,18 @@ All notable changes to err are documented here. Format follows
 
 ### Added
 
-- **err now sees what a command printed — when it can.** `cmd | err why` reads
-  the piped output from err's own stdin and explains the producing side of the
-  pipeline (the launcher strips the trailing `| err why` stage that `preexec`
-  records, and marks the exit code unknown because a pipeline's status is not
-  the producer's). `errc` now tees **stdout as well as stderr**, so its
-  explanation is grounded in the output and not just the error text. Both are
-  bounded (`output_lines`, default 40 lines / 3000 chars) and cleared on every
-  other command's `preexec`, so a stale `errc` capture can never attach itself
-  to a later command.
+- **Command output can ground explanations.** `cmd | err wtf` reads the
+  producer's output from err's stdin. With `capture = pty`, the relay records
+  the previous command's bounded output while preserving TTY semantics. Both
+  paths feed the same size-limited prompt context.
 - **Question mode carries the last command as context** (`Command:`, exit code,
   and the captured output when err has it), for exactly one turn — the
   launcher clears `_ERR_LAST_FRESH` once err has answered. A follow-up like
   `err what is going on?` no longer answers from nothing.
 
-Not captured, on purpose: a plain command's stdout. Doing that from a shell
-hook means `exec > >(tee …)`, i.e. fd 1 becomes a pipe for the command's whole
-run — colours, pagers and full-screen programs break. `errc` and `| err` are the
-opt-in paths; Atuin's pty-proxy is the only alternative that stays transparent.
+The old pipe-based shell hook was removed because it broke TTY-dependent
+programs. The PTY relay is now the opt-in automatic path; piping output remains
+available when capture is off.
 
 ### Added
 
@@ -321,7 +340,7 @@ err and marv-mlx are now one tool.
 - Bare `err` prints the help screen instead of explaining the last command.
   Explaining is now explicit: `err what` or `err why` (and a hidden `err wtf`),
   and only when the word stands alone — `err why did that fail` is still a
-  question. `errc` is unaffected: it calls the explainer directly.
+  question. The explain dispatch remains unchanged.
 - The help screen carries the tagline: *TO ERR IS HUMAN.*
 - Asking a question with `backend = mlx` and nothing on `:11500` now starts the
   selected model (the engine's new hidden `ensure` verb) instead of failing.
@@ -399,8 +418,8 @@ err and marv-mlx are now one tool.
   first-class choice in `err run` / `err switch` / `err default` / `err chat`,
   served by `fm serve` on its own port (`err.conf` → `port`, default `8080`).
   `err status` reports it; `err stop apple-fm` stops it.
-- **The explain / ask layer.** `err`, `err <question>`, `errc <cmd...>` and the
-  session verbs (`new`, `clear`, `resume`, `delete`) keep working on Apple
+- **The explain / ask layer.** `err`, `err <question>` and the session verbs
+  (`new`, `clear`, `resume`, `delete`) keep working on Apple
   Foundation Models, on-device by default.
 - **One install path.** `install.sh` installs `uv`, `gum` and `mlx-vlm` without
   Xcode CLT, Homebrew or Rust, then wires the launcher into `~/.zshrc` once.

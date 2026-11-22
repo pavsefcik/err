@@ -24,6 +24,21 @@ import err as errmod  # noqa: E402
 import mock_fm_server  # noqa: E402
 
 
+def _shipped_conf():
+    out = {}
+    with open(os.path.join(REPO, "err.conf")) as f:
+        for line in f:
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip()
+    return out
+
+
+SHIPPED = _shipped_conf()
+EXPLAIN_PROMPT = SHIPPED["explain_system_prompt"]
+QUESTION_PROMPT = SHIPPED["question_system_prompt"]
+
+
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
@@ -92,13 +107,28 @@ def main():
         check("ghp_abc123XYZ" not in redacted, "raw github token survived redaction")
         check("«redacted»" in redacted, "redaction marker missing")
         check(errmod.tail_output("a\nb\nc", 2) == "b\nc", "tail_output line bound")
+        check(errmod.tail_output("\x1b[31mred\x1b[0m") == "red",
+              "ANSI terminal controls are removed from captured text")
         check(errmod.tail_output("q", 10, 1).endswith("q"), "tail_output char bound")
         check(errmod.build_ask_user("q") == "q", "a question with no command must stay bare")
         check(
             errmod.first_fenced_line("Try:\n```bash\nls -la\n```\n") == "ls -la",
             "first fenced line extraction",
         )
-        ok("redact + fenced extraction")
+        # A suggestion is pasted into an interactive zsh: `!` outside single
+        # quotes must never reach the history file raw.
+        check(errmod.zsh_safe_command('echo "Greetings from macOS zsh!"')
+              == "echo 'Greetings from macOS zsh!'",
+              "a literal double-quoted ! should become single quoted")
+        check(errmod.zsh_safe_command('echo "a!b $HOME"') == 'echo "a\\!b $HOME"',
+              "an expandable double-quoted span keeps its quotes and escapes !")
+        check(errmod.zsh_safe_command("echo 'hi!there'") == "echo 'hi!there'",
+              "single quotes need no change")
+        check(errmod.zsh_safe_command("echo hi!there") == "echo hi\\!there",
+              "an unquoted ! is escaped")
+        check(errmod.zsh_safe_command("! false") == "! false",
+              "history negation is not an expansion")
+        ok("redact + fenced extraction + zsh-safe suggestions")
 
         # ── unit: readiness + error bodies ────────────────────────────
         code, msg = errmod.http_error_detail(
@@ -154,20 +184,20 @@ def main():
         # The prompt in force comes from one definition (err.py); err.conf may
         # override it but must not duplicate it, or the copies drift apart.
         check(
-            messages[0]["content"] == errmod.DEFAULT_SYSTEM_PROMPT,
+            messages[0]["content"] == EXPLAIN_PROMPT,
             "explain did not send the built-in system prompt",
         )
         check(
-            "code block" in errmod.DEFAULT_SYSTEM_PROMPT.lower(),
+            "code block" in EXPLAIN_PROMPT.lower(),
             "the explain prompt must refuse a code block: its first fenced "
             "line would be fed to the suggestion channel",
         )
         check(
-            "output err captured" in errmod.DEFAULT_SYSTEM_PROMPT,
+            "output err captured" in EXPLAIN_PROMPT,
             "the explain prompt must name captured output",
         )
         check(
-            "captured or that was piped" in errmod.DEFAULT_QUESTION_PROMPT,
+            "output err captured" in QUESTION_PROMPT,
             "the question prompt must name captured output",
         )
         check(
@@ -193,7 +223,7 @@ def main():
         check(proc.returncode == 0, f"ask failed: {proc.stderr}")
         request = state.requests[-1]
         check(
-            request["messages"][0]["content"] == errmod.DEFAULT_QUESTION_PROMPT,
+            request["messages"][0]["content"] == QUESTION_PROMPT,
             "ask did not send the built-in question prompt",
         )
         check(
@@ -212,31 +242,38 @@ def main():
         check(read(suggest_file) == "ls -la", "suggested command not written")
         ok("ask mode + history + suggestion")
 
-        # ── captured output: what a command printed reaches the model ─
-        # `ps aux | head | err why`: the launcher marks the stdin pipe and err
-        # reads it. The exit code is unknown on purpose — a pipeline's status
-        # is not the producer's.
-        state.reply = "The load is high on three processes."
-        proc = run([], {"_ERR_LAST_CMD": "ps aux | head",
-                       "_ERR_LAST_EXIT": "-1",
-                       "_ERR_STDIN_PIPED": "1"},
-                   stdin="USER PID %CPU\npavel 44594 9.4\n")
-        check(proc.returncode == 0, f"piped explain failed: {proc.stderr}")
-        user = state.requests[-1]["messages"][-1]["content"]
-        check("Output (last lines):" in user, "piped output not labelled in the prompt")
-        check("pavel 44594 9.4" in user, "piped output did not reach the model")
-        check("Exit code: unknown" in user, "a piped command claimed a known exit code")
+        # ── a suggestion that would leave zsh at dquote> is repaired ──
+        state.reply = 'Say hi.\n```bash\necho "Greetings from macOS zsh!"\n```\n'
+        proc = run(["--ask", "say hi"])
+        check(proc.returncode == 0, f"ask failed: {proc.stderr}")
+        check(read(suggest_file) == "echo 'Greetings from macOS zsh!'",
+              "history would receive a command that asks for more input: %r"
+              % read(suggest_file))
+        ok("suggestions are made zsh-safe")
 
-        # `errc`'s capture file, bounded to the tail (the model gets the shape
+        # ── captured output: what a command printed reaches the model ─
+        state.reply = "The load is high on three processes."
+        # Captured output is bounded to the tail (the model gets the shape
         # of the output, not 200 lines of it).
         with open(stdout_file, "w") as f:
-            f.write("\n".join("row %d" % i for i in range(200)) + "\n")
-        proc = run([], {"_ERR_LAST_CMD": "errc ps aux", "_ERR_LAST_EXIT": "0",
+            f.write("\n".join("row %d" % i for i in range(200))
+                    + "\n\x1b[1m\x1b[7m%\x1b[0m \r\n")
+        proc = run([], {"_ERR_LAST_CMD": "ps aux", "_ERR_LAST_EXIT": "0",
                        "_ERR_STDOUT_FILE": stdout_file})
         user = state.requests[-1]["messages"][-1]["content"]
         check("row 199" in user, "captured stdout tail missing")
         check("row 159" not in user, "captured stdout not bounded to the tail")
+        request_count = len(state.requests)
+        record = run(["--record"], {"_ERR_LAST_CMD": "brew list", "_ERR_LAST_EXIT": "0",
+                                    "_ERR_STDOUT_FILE": stdout_file})
+        check(record.returncode == 0, "--record should succeed")
+        check("Command: brew list" in record.stdout, "record omitted the command")
+        check("Exit code: 0" in record.stdout, "record omitted the exit code")
+        check("row 199" in record.stdout, "record omitted captured output")
+        check("\n%" not in record.stdout, "record retained the shell prompt artifact")
+        check(len(state.requests) == request_count, "record contacted the model")
         ok("captured output reaches the explain prompt")
+        ok("record prints the local command/output without a model")
 
         # ── question mode carries the last command as context ────────
         state.reply = "Looks like ten busy processes."
@@ -272,38 +309,44 @@ def main():
             origin, _, text = proc.stdout.rstrip("\n").partition("\t")
             return origin, text
 
-        origin, text = prompt("explain")
-        check(origin == "builtin", f"empty conf should be builtin, got {origin!r}")
-        check(text == errmod.DEFAULT_SYSTEM_PROMPT, "builtin explain text changed")
-        origin, text = prompt("question")
-        check(origin == "builtin", f"empty conf should be builtin, got {origin!r}")
-        check(text == errmod.DEFAULT_QUESTION_PROMPT, "builtin question text changed")
+        def refused(kind, conf=prompt_conf):
+            proc = run(["--prompt", kind], {"ERR_CONF": conf})
+            return proc.returncode == 1 and "err reset" in proc.stderr
+
+        # The prompts exist only in err.conf: a missing or empty key stops err.
+        check(refused("explain"), "a conf without explain_system_prompt must refuse")
+        check(refused("question"), "a conf without question_system_prompt must refuse")
+        with open(prompt_conf, "w") as f:
+            f.write("explain_system_prompt =\nquestion_system_prompt = \n")
+        check(refused("explain") and refused("question"),
+              "an empty prompt key must refuse")
+
+        shipped = SHIPPED
+        check(shipped.get("explain_system_prompt", "").startswith("You explain"),
+              "the shipped err.conf lacks the explain prompt")
+        check(shipped.get("question_system_prompt", "").startswith("You answer"),
+              "the shipped err.conf lacks the question prompt")
+        with open(prompt_conf, "w") as f:
+            f.write("explain_system_prompt = " + shipped["explain_system_prompt"] + "\n"
+                    "question_system_prompt = " + shipped["question_system_prompt"] + "\n")
+        check(prompt("explain") == ("conf", shipped["explain_system_prompt"]),
+              "explain prompt not read from err.conf")
+        check(prompt("question") == ("conf", shipped["question_system_prompt"]),
+              "question prompt not read from err.conf")
 
         with open(prompt_conf, "w") as f:
             f.write("system_prompt = Legacy explain.\n")
-        check(prompt("explain") == ("custom", "Legacy explain."),
-              "the legacy system_prompt key is no longer read")
+        check(refused("explain"), "the legacy system_prompt key must not count")
 
         with open(prompt_conf, "w") as f:
-            f.write("system_prompt = Legacy explain.\n"
-                    "explain_system_prompt = New explain.\n")
-        check(prompt("explain") == ("custom", "New explain."),
-              "explain_system_prompt must win over system_prompt")
-
-        with open(prompt_conf, "w") as f:
-            f.write("question_system_prompt = Answer in one word.\n")
-        check(prompt("question") == ("custom", "Answer in one word."),
-              "question_system_prompt override ignored")
+            f.write("explain_system_prompt = New explain.\n"
+                    "question_system_prompt = Answer in one word.\n")
+        check(prompt("explain") == ("conf", "New explain."), "explain override ignored")
+        check(prompt("question") == ("conf", "Answer in one word."),
+              "question override ignored")
         proc = run(["--prompt", "bogus"], {"ERR_CONF": prompt_conf})
         check(proc.returncode == 2, "--prompt bogus should exit 2")
 
-        # The shipped err.conf must not restate the defaults: that was the
-        # duplication that made drift invisible.
-        shipped = read(os.path.join(REPO, "err.conf"))
-        for word in ("You explain what a shell command did",
-                     "You answer shell questions"):
-            check(word not in shipped,
-                  "err.conf duplicates a built-in prompt: " + word)
         ok("prompts come from one source, both keys honoured")
 
         # ── session round-trip persists and reloads turns ────────────
@@ -470,6 +513,19 @@ def main():
             check(errmod.autostart_enabled(), "ERR_MLX_AUTOSTART=on should enable it")
             os.environ.pop("ERR_MLX_AUTOSTART")
             check(errmod.autostart_enabled(), "autostart should default to on")
+
+            # `ensure` owns readiness. A brief failed probe immediately after it
+            # returns must not turn successful startup into a false failure.
+            old_call = errmod.subprocess.call
+            old_ready = errmod.mlx_ready
+            try:
+                errmod.subprocess.call = lambda *a, **kw: 0
+                errmod.mlx_ready = lambda _base: False
+                check(errmod.autostart_mlx("http://127.0.0.1:11500", "mock/model"),
+                      "successful ensure must hand readiness to the bounded waiter")
+            finally:
+                errmod.subprocess.call = old_call
+                errmod.mlx_ready = old_ready
 
             # With autostart off and no server, the old instruction is printed
             # and err exits 1 instead of hanging or launching.

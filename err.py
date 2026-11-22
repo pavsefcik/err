@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""err 0.601 — explain, ask and session engine for the err launcher.
+"""err 0.602 — explain, ask and session engine for the err launcher.
 
 Stdlib-only, single file, python3.9 compatible.
 """
@@ -445,20 +445,17 @@ def mlx_model_id() -> str:
     err.conf's `model_id` (`system` / `pcc`) belongs to the fm backend. Sending
     it to the MLX server makes mlx-vlm try to load a HuggingFace repo called
     "system" and fail with Repository Not Found. The model manager records what
-    it started in `last-model` (and what you chose in `default-model`).
+    it started in `last-model`.
     """
     explicit = (os.environ.get("ERR_MLX_MODEL") or CFG.get("mlx_model") or "").strip()
     if explicit:
         return explicit
-    for name in ("last-model", "default-model"):
-        try:
-            with open(os.path.join(state_dir(), name)) as f:
-                model = f.readline().strip()
-        except OSError:
-            continue
-        if model and model not in FM_MODEL_IDS:
-            return model
-    return ""
+    try:
+        with open(os.path.join(state_dir(), "last-model")) as f:
+            model = f.readline().strip()
+    except OSError:
+        return ""
+    return "" if model in FM_MODEL_IDS else model
 
 
 def autostart_enabled() -> bool:
@@ -499,7 +496,11 @@ def autostart_mlx(base: str, model: str) -> bool:
     if rc != 0:
         print(f"err: starting {model} failed (exit {rc})", file=sys.stderr)
         return False
-    return mlx_ready(base)
+    # `ensure` already waits for the model to become ready. Do not gate success
+    # on a second, instantaneous health probe: a transient reconnect between
+    # ensure's return and this probe used to report a false "server not
+    # reachable". prepare_backend() performs the bounded readiness wait next.
+    return True
 
 
 def prepare_backend() -> tuple:
@@ -923,6 +924,69 @@ def first_fenced_line(text: str):
     return None
 
 
+def zsh_safe_command(command: str) -> str:
+    """Make a suggested command safe for an interactive zsh.
+
+    History expansion fires on `!` outside single quotes: inside double quotes
+    it eats the closing quote (the `dquote>` trap), unquoted it aborts with
+    "event not found". A literal double-quoted span can simply become single
+    quoted (the nicer answer); otherwise `!` is escaped, which zsh undoes.
+    """
+    out = []
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "'":
+            end = command.find("'", i + 1)
+            end = n - 1 if end < 0 else end
+            out.append(command[i:end + 1])
+            i = end + 1
+            continue
+        if ch == '"':
+            raw, escaped, j = [], [], i + 1
+            while j < n:
+                cur = command[j]
+                if cur == "\\" and j + 1 < n:
+                    raw.append(command[j:j + 2])
+                    escaped.append(command[j:j + 2])
+                    j += 2
+                    continue
+                if cur == '"':
+                    break
+                if cur == "!":
+                    escaped.append("\\!")
+                else:
+                    escaped.append(cur)
+                raw.append(cur)
+                j += 1
+            inner, fixed = "".join(raw), "".join(escaped)
+            if "!" in inner and not any(c in inner for c in "'$`\\"):
+                out.append("'" + inner + "'")
+            else:
+                out.append('"' + fixed + '"')
+            if j < n:
+                j += 1
+            i = j
+            continue
+        if ch == "!":
+            prev = command[i - 1] if i else ""
+            nxt = command[i + 1] if i + 1 < n else ""
+            # `! cmd` is history negation, not an expansion
+            if (not prev or prev in " \t\n;|&(") and (not nxt or nxt in " \t\n"):
+                out.append("!")
+            else:
+                out.append("\\!")
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def suggest_mode() -> str:
     return (os.environ.get("ERR_SUGGEST") or CFG.get("suggest", "history")).strip().lower()
 
@@ -949,6 +1013,7 @@ def write_suggest_file(text: str) -> None:
     command = first_fenced_line(text)
     if not command:
         return
+    command = zsh_safe_command(command)
     data = command.encode("utf-8")[:SUGGEST_BYTE_LIMIT].decode("utf-8", "ignore")
     try:
         with open(path, "w") as f:
@@ -991,8 +1056,8 @@ def stream_chat(messages: list, base_url: str, model_id: str) -> tuple:
     payload = json.dumps(
         {
             "model": model_id,
-            "max_tokens": _cfg_int("max_tokens", 200),
-            "temperature": _cfg_float("temperature", 0.3),
+            "max_tokens": _cfg_int("max_tokens", 2048),
+            "temperature": _cfg_float("temperature", 0.7),
             "top_p": 0.8,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -1081,50 +1146,35 @@ def stream_chat(messages: list, base_url: str, model_id: str) -> tuple:
 
 # One prompt, one source: these are the defaults, err.conf only overrides them.
 # The explain prompt must not ask for a code block — err feeds the first fenced
-# line to the suggestion channel, and `err what` must not put a command in your
+# line to the suggestion channel, and `err wtf` must not put a command in your
 # history behind your back. The question prompt *is* that contract, on purpose.
-DEFAULT_SYSTEM_PROMPT = (
-    "You explain what a shell command did on macOS zsh. Answer in one short "
-    "sentence. If the command is an alias, say which command the alias runs. "
-    "Do not include a code block. You see the command, its exit code, and any "
-    "output err captured or that was piped into it."
-)
-
-DEFAULT_QUESTION_PROMPT = (
-    "You answer shell questions for macOS zsh. Reply in at most three short "
-    "sentences, then give one example command in a fenced code block. If the "
-    "answer needs no command, skip the code block. You see the last command, "
-    "its exit code, and any output err captured or that was piped into it; if "
-    "the output is missing, say so and suggest `cmd | err wtf`."
-)
-
-
 def effective_prompt(kind: str) -> tuple:
-    """(origin, text) of the system prompt in force for `kind`.
+    """(origin, text) of the system prompt for `kind`.
 
-    origin is "custom" when err.conf overrides the built-in default, so
-    `err doctor` can say which prompt is actually answering. The explain key
-    was called `system_prompt` for a long time; the old name is still read, so
-    an existing err.conf keeps working (and keeps being reported as custom).
+    The prompts live only in err.conf (`err config` edits them; `err reset`
+    restores the shipped ones). There is no built-in copy: a missing or empty
+    key stops err rather than answering with a prompt nobody chose.
     """
     if kind == "explain":
-        for key in ("explain_system_prompt", "system_prompt"):
-            if CFG.get(key):
-                return "custom", CFG[key]
-        return "builtin", DEFAULT_SYSTEM_PROMPT
-    if kind == "question":
-        if CFG.get("question_system_prompt"):
-            return "custom", CFG["question_system_prompt"]
-        return "builtin", DEFAULT_QUESTION_PROMPT
-    raise ValueError("unknown prompt kind: %s" % kind)
+        key = "explain_system_prompt"
+    elif kind == "question":
+        key = "question_system_prompt"
+    else:
+        raise ValueError("unknown prompt kind: %s" % kind)
+    text = CFG.get(key, "").strip()
+    if not text:
+        print("err: %s is missing or empty in %s" % (key, conf_path()), file=sys.stderr)
+        print("     run `err reset` to restore the shipped config, or `err config` to edit it",
+              file=sys.stderr)
+        sys.exit(1)
+    return "conf", text
 
 
 # ── captured output ─────────────────────────────────────────────────
-# The shell cannot capture stdout without turning fd 1 into a pipe (colours,
-# pagers and full-screen programs all break), so err gets the last command's
-# output from exactly two places: the capture file (_ERR_STDOUT_FILE) and,
-# for `cmd | err wtf`, err's own stdin. Both are bounded here: the model
-# needs the shape of the output, not a log dump.
+# The launcher does not redirect command output: an optional PTY relay records
+# it without changing fd 1's TTY status. err gets output from the capture file
+# (_ERR_STDOUT_FILE). It is bounded:
+# the model needs the shape of the output, not a log dump.
 OUTPUT_LINES = max(1, _cfg_int("output_lines", 40))
 OUTPUT_CHARS = 3000
 STDIN_MAX_BYTES = 65536
@@ -1136,31 +1186,22 @@ def _flag(name: str) -> bool:
     return value not in ("", "0", "false", "no", "off")
 
 
+ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])"
+)
+
+
 def tail_output(text: str, max_lines: int = OUTPUT_LINES,
                 max_chars: int = OUTPUT_CHARS) -> str:
     """Last `max_lines` lines of `text`, capped at `max_chars`."""
     if not text:
         return ""
+    text = ANSI_RE.sub("", text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     out = "\n".join(lines[-max_lines:]).strip()
     if len(out) > max_chars:
         out = "…" + out[-max_chars:]
     return out
-
-
-def read_stdin_output() -> str:
-    """Output piped into err (`ps aux | err wtf`).
-
-    Only when the launcher says so (_ERR_STDIN_PIPED): reading fd 0 on a guess
-    would steal the next line from a shell that is itself reading a script
-    from stdin.
-    """
-    if not _flag("_ERR_STDIN_PIPED"):
-        return ""
-    try:
-        return sys.stdin.buffer.read(STDIN_MAX_BYTES).decode("utf-8", "replace")
-    except Exception:
-        return ""
 
 
 def read_capture_file(name: str) -> str:
@@ -1177,14 +1218,39 @@ def read_capture_file(name: str) -> str:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - STDIN_MAX_BYTES))
-            return f.read(STDIN_MAX_BYTES).decode("utf-8", "replace")
+            text = f.read(STDIN_MAX_BYTES).decode("utf-8", "replace")
+        text = ANSI_RE.sub("", text)
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        while lines and (not lines[-1].strip() or lines[-1].strip() in ("%", "#")):
+            lines.pop()
+        return "\n".join(lines)
     except OSError:
         return ""
 
 
-def captured_output(stdin_text: str) -> str:
-    """The last command's stdout: the pipe err was handed, else the capture file."""
-    return stdin_text or read_capture_file("_ERR_STDOUT_FILE")
+def captured_output() -> str:
+    """The last command's output, from the capture file."""
+    return read_capture_file("_ERR_STDOUT_FILE")
+
+
+def cmd_record() -> None:
+    """Print the shell command/output currently available to err, without a model."""
+    command = os.environ.get("_ERR_LAST_CMD", "")
+    if not command:
+        print("err: no command recorded yet.", file=sys.stderr)
+        sys.exit(1)
+    exit_code = _safe_int(os.environ.get("_ERR_LAST_EXIT", "-1"), -1)
+    print("Command: " + command)
+    if exit_code < 0:
+        print("Exit code: unknown")
+    else:
+        print("Exit code: %d" % exit_code)
+    output = tail_output(captured_output())
+    if output:
+        print("Output (last lines):")
+        print(output)
+    else:
+        print("Output: (none captured)")
 
 
 def build_explain_user(cmd: str, exit_code: int, stderr_content: str,
@@ -1241,6 +1307,7 @@ def build_explain_user(cmd: str, exit_code: int, stderr_content: str,
 
 
 def run_explain() -> None:
+    effective_prompt("explain")  # fail before any model is started
     cmd = os.environ.get("_ERR_LAST_CMD", "")
     exit_code_str = os.environ.get("_ERR_LAST_EXIT", "0")
 
@@ -1249,10 +1316,6 @@ def run_explain() -> None:
         sys.exit(1)
 
     exit_code = int(exit_code_str)
-
-    # Drain the pipe BEFORE prepare_backend can spawn anything: the engine it
-    # may start inherits fd 0, and a prompt there would eat the output.
-    stdin_output = read_stdin_output()
 
     if exit_code == 0:
         print(f"{cmd} (exit 0)")
@@ -1271,7 +1334,7 @@ def run_explain() -> None:
 
     sid = current_session_id()
     user_content = build_explain_user(cmd, exit_code, stderr_content,
-                                      captured_output(stdin_output))
+                                      captured_output())
     system_prompt = effective_prompt("explain")[1]
     messages = conversation_messages(system_prompt, sid, user_content)
 
@@ -1312,7 +1375,7 @@ def build_ask_user(question: str, cmd: str = "", exit_code: int = -1,
 
 
 def run_ask(question: str) -> None:
-    stdin_output = read_stdin_output()
+    effective_prompt("question")  # fail before any model is started
     base_url, model_id = prepare_backend()
 
     # Only a command that literally just ran is context; after an err call the
@@ -1322,11 +1385,7 @@ def run_ask(question: str) -> None:
     exit_code = -1
     if fresh:
         exit_code = _safe_int(os.environ.get("_ERR_LAST_EXIT", "-1"), -1)
-        if _flag("_ERR_STDIN_PIPED"):
-            # A pipeline's status is not the producer's, and `ps aux | err wtf`
-            # must not claim exit 0 for the command whose output it was handed.
-            exit_code = -1
-    output_content = captured_output(stdin_output) if (fresh or _flag("_ERR_STDIN_PIPED")) else ""
+    output_content = captured_output() if fresh else ""
     user_content = build_ask_user(question, cmd if fresh else "", exit_code,
                                   output_content)
 
@@ -1584,6 +1643,11 @@ def cmd_delete() -> None:
 def main() -> None:
     args = sys.argv[1:]
 
+    # Internal: display the shell's current record without contacting a model.
+    if args and args[0] == "--record":
+        cmd_record()
+        return
+
     # Internal: arm / run the idle watchdog. `--watchdog <pid> [port]` arms a
     # detached one; `--watchdog-run` is that detached process itself. Called by
     # err.py itself (fm) and by the engine's `_err_headless_launch` (MLX),
@@ -1610,11 +1674,10 @@ def main() -> None:
         # `err doctor` can show what is actually answering instead of guessing
         # from err.conf (which may override nothing at all).
         kind = args[1] if len(args) > 1 else "explain"
-        try:
-            origin, text = effective_prompt(kind)
-        except ValueError:
+        if kind not in ("explain", "question"):
             print("usage: err.py --prompt explain|question", file=sys.stderr)
             sys.exit(2)
+        origin, text = effective_prompt(kind)
         print("%s\t%s" % (origin, text))
         return
 

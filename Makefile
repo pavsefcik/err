@@ -1,4 +1,4 @@
-# err v0.601.0 — dev tasks. The tool itself needs no build step.
+# err v0.602.0 — dev tasks. The tool itself needs no build step.
 
 VERSION := $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
 
@@ -15,6 +15,7 @@ test-shell:
 test-py:
 	@echo "== err.py =="
 	@python3 tests/test_err.py
+	@python3 tests/test_pty_proxy.py
 
 # Menus: the real picker code (rows, cursor, cancel, choice), no toolkit.
 test-menu:
@@ -28,9 +29,11 @@ test-smoke:
 
 lint:
 	@zsh -n err-launcher.zsh && echo "err-launcher.zsh ok"
+	@zsh -n lib/err-pty-startup.zsh && echo "err-pty-startup.zsh ok"
 	@zsh -n err-models.zsh && echo "err-models.zsh ok"
 	@zsh -n lib/err-helpers.zsh && echo "err-helpers.zsh ok"
-	@python3 -m py_compile err.py && echo "err.py ok"
+	@sh -n install.sh && echo "install.sh ok"
+	@python3 -m py_compile err.py lib/err-pty-proxy.py tests/test_pty_proxy.py && echo "python ok"
 
 install:
 	@sh install.sh

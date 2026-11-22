@@ -88,6 +88,19 @@ _CALLS=()
 err wtf did that fail >/dev/null 2>&1
 _check "py:--ask wtf did that fail" "${_CALLS[1]:-}" "err wtf ... asks a question"
 
+print "err record inspects without consuming context"
+_ERR_LAST_CMD="brew list"; _ERR_LAST_EXIT=0; _err_fresh=1
+_CALLS=(); err record >/dev/null 2>&1
+_check "py:--record" "${_CALLS[1]:-}" "err record uses the local record path"
+_check "1" "$_err_fresh" "err record preserves the fresh-command context"
+_err_fresh=0
+_err_py() { _CALLS+=( "py:$*" ); return 1 }
+_err_fresh=1
+err retry this context >/dev/null 2>&1
+_check "1" "$_err_fresh" "a failed ask does not consume fresh output context"
+_err_py() { _CALLS+=( "py:$*" ) }
+_err_fresh=0
+
 print "the menu re-dispatches its row through err"
 eval "$_REAL_HELP_INTERACTIVE"
 _CALLS=()
@@ -166,16 +179,27 @@ print "capture flag"
 _capconf=$(mktemp)
 print "capture = on" > "$_capconf"
 ERR_CONF="$_capconf"
-_check "0" "$(_err_capture_mode; print $?)" "capture = on parses"
+_check "1" "$(_err_capture_mode; print $?)" "capture = on is ignored safely"
 print "capture = off" > "$_capconf"
 _check "1" "$(_err_capture_mode; print $?)" "capture = off is the default"
+_ERR_PTY_OLD="${ERR_PTY_PROXY_ACTIVE:-}"
+ERR_PTY_PROXY_ACTIVE=1
+_check "0" "$(_err_capture_mode; print $?)" "proxy child enables OSC capture hooks"
+ERR_PTY_PROXY_ACTIVE="$_ERR_PTY_OLD"
+# A pipeline ending in err records nothing and starts no capture.
+_ERR_PTY_OLD_ACTIVE="${ERR_PTY_PROXY_ACTIVE:-}"
+ERR_PTY_PROXY_ACTIVE=1 ERR_PTY_TOKEN=test-token
+_err_last_cmd="brew list"; _err_preexec 'brew list | err wtf'
+_check "brew list" "$_err_last_cmd" "a pipeline into err is not recorded"
+ERR_PTY_PROXY_ACTIVE="$_ERR_PTY_OLD_ACTIVE"
+unset ERR_PTY_TOKEN
 rm -f "$_capconf"
 # The state config is what a real shell reads when ERR_CONF is unset.
 _capstate=$(mktemp -d)
 print "capture = on" > "$_capstate/err.conf"
 _capout=$(ERR_STATE_DIR="$_capstate" ERR_CONF= zsh -f -c \
   "source '$_ERR_DIR/err-launcher.zsh'; _err_capture_mode; print \$?" 2>&1)
-_check "0" "$_capout" "capture is read from ERR_STATE_DIR/err.conf"
+_check "1" "$_capout" "capture config cannot redirect shell output"
 rm -rf "$_capstate"
 ERR_CONF="$_ERR_DIR/err.conf"
 

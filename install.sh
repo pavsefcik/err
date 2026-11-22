@@ -1,5 +1,5 @@
 #!/bin/sh
-# err installer — v0.601.0
+# err installer — v0.602.0
 #
 # Usage (from an err checkout):
 #   sh install.sh
@@ -255,13 +255,44 @@ if [ "$UV_TOOL_BIN" != "$LOCAL_BIN" ]; then
   wire_zsh_path "$UV_TOOL_BIN"
 fi
 
-# ---- 6. Wire the launcher into ~/.zshrc (idempotent) -------------------------
-# The marker line makes the block findable; the source-line grep also catches a
-# launcher wired by the older install.command, so the source is never added
-# twice. The block is printed before it is appended.
+# ---- 6. Wire err's startup hook and launcher into ~/.zshrc -------------------
+# The PTY bootstrap is placed after any literal state/config assignment and
+# otherwise prepended, before integrations initialize. It is a no-op unless
+# capture = pty. Existing paths are replaced on an install-directory move.
+wire_pty_startup() {
+  if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
+    says "[dry-run] ensure source \"$repo_dir/lib/err-pty-startup.zsh\" is early in ~/.zshrc"
+    return 0
+  fi
+  [ -f "$HOME/.zshrc" ] || : > "$HOME/.zshrc"
+  _tmp=$(mktemp "$HOME/.zshrc.err.XXXXXX") || die "could not create a temporary ~/.zshrc"
+  _mode=644
+  [ -f "$HOME/.zshrc" ] && _mode=$(stat -f %Lp "$HOME/.zshrc" 2>/dev/null || printf 644)
+  awk -v hook="source \"$repo_dir/lib/err-pty-startup.zsh\"" '
+    {
+      if (index($0, "lib/err-pty-startup.zsh")) next
+      lines[NR] = $0
+      if ($0 !~ /^[[:space:]]*#/ && $0 ~ /ERR_(STATE_DIR|CONF)[[:space:]]*=/) state_line = NR
+      if ($0 !~ /^[[:space:]]*#/ && index($0, "err-launcher.zsh") && !launcher_line) launcher_line = NR
+    }
+    END {
+      insert = 0
+      if (state_line && (!launcher_line || state_line < launcher_line)) insert = state_line
+      if (insert == 0) print hook
+      for (i = 1; i <= NR; i++) {
+        print lines[i]
+        if (i == insert) print hook
+      }
+    }
+  ' "$HOME/.zshrc" > "$_tmp" || { rm -f "$_tmp"; die "could not update ~/.zshrc"; }
+  chmod "$_mode" "$_tmp" 2>/dev/null || true
+  mv "$_tmp" "$HOME/.zshrc" || { rm -f "$_tmp"; die "could not replace ~/.zshrc"; }
+  says "wired PTY startup hook early in ~/.zshrc"
+}
+
 step "Wiring err into ~/.zshrc…"
 if [ "${ERR_NO_ZSH:-0}" = "1" ]; then
-  says "skipped (ERR_NO_ZSH=1) — add manually: source \"$repo_dir/err-launcher.zsh\""
+  says "skipped (ERR_NO_ZSH=1) — add startup hook first, then source \"$repo_dir/err-launcher.zsh\""
 elif [ -f "$HOME/.zshrc" ] && grep -Fq 'err-launcher.zsh' "$HOME/.zshrc" 2>/dev/null; then
   says "launcher already wired in ~/.zshrc"
 elif [ "${ERR_DRY_RUN:-0}" = "1" ]; then
@@ -277,6 +308,9 @@ else
     printf 'test -f "%s/err-launcher.zsh" && source "%s/err-launcher.zsh"\n' "$repo_dir" "$repo_dir"
   } >> "$HOME/.zshrc"
   says "appended launcher source to ~/.zshrc"
+fi
+if [ "${ERR_NO_ZSH:-0}" != "1" ]; then
+  wire_pty_startup
 fi
 
 # ---- 7. Final verification ---------------------------------------------------

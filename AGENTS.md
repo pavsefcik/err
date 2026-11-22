@@ -2,7 +2,7 @@
 
 `err` is two tools wearing one name:
 
-1. **explain / ask** — `err wtf`, `err "<question>"`, `cmd | err wtf`, plus
+1. **explain / ask** — `err wtf`, `err "<question>"`, plus
    conversation sessions (`new` / `resume`). Bare `err`, `err -h` and `err help`
    open the interactive menu. Runs on the on-device Apple Foundation Model
    (`fm`), no API key.
@@ -24,26 +24,25 @@ dispatch, env vars, or session storage.
 | `err-models.zsh` | the ported marv-mlx engine | a child `zsh` |
 | `lib/err-helpers.zsh` | engine helpers (`_err_*`), sourced only by the engine | that child |
 | `lib/err_moe/` | streaming-MoE server for models too big for RAM | a child `python3` |
-| `tests/` | `test_dispatch.zsh`, `test_err.py` + mock SSE server | CI / `make test` |
-| `install.sh` | uv + mlx-vlm, then wires the launcher into `~/.zshrc` | the user |
+| `lib/err-pty-startup.zsh` | opt-in PTY bootstrap, sourced first from `~/.zshrc` | zsh startup |
+| `lib/err-pty-proxy.py` | TTY relay and bounded OSC-delimited output capture | parent terminal |
+| `tests/` | dispatch, Python, PTY proxy, mock SSE and smoke suites | CI / `make test` |
+| `install.sh` | uv + mlx-vlm, then wires startup hook and launcher into `~/.zshrc` | the user |
 
-`err.conf` holds the explain/ask settings (prompts, `backend`, `port` for `fm`).
-The model-launch settings are a separate file, `$ERR_STATE_DIR/config.zsh`,
-hand-edited via `err config`.
+`err.conf` is the one config file, `$ERR_STATE_DIR/err.conf` (seeded from the
+repo template, opened by `err config`). Thinking is its first line.
 
 State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
 marv harness** — never write err's state there; the launcher's one-time migration
 only *reads* it. It holds
-`config.zsh`, `sessions/`, `logs/`, `apc/`, `run/` (per-shell scratch),
-`default-model`, `last-model`, `err-curator.md` (the curated catalog). Weights
+`err.conf`, `sessions/`, `logs/`, `apc/`, `run/` (per-shell scratch),
+`last-model` (the default model), `err-curator.md` (the curated catalog). Weights
 live in the HF hub cache, never there.
 
-**One config file.** `$ERR_STATE_DIR/err.conf` — flat `key = value`, seeded
-from the repo template, opened by `err config`. `config.zsh` is a legacy input:
-`_err_conf_seed` lifts its managed block and flag arrays into the new file once.
-Python and zsh read the same file, repeatable `server_flag` / `chat_flag` lines
-rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
-`err "<question>"` (they used to be two values in two files).
+**One config file.** `$ERR_STATE_DIR/err.conf` — flat `key = value`, one per
+line, comments on their own line only (err.py keeps the whole value after `=`,
+so `port = 8080  # x` breaks it). Python and zsh read the same file. Repeatable
+`server_flag` lines are the only multi-value key.
 
 ## Invariants — break these and the tool stops being err
 
@@ -90,9 +89,8 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
 - **Never use a fixed path under `/tmp`** for per-invocation state. All scratch
   files live in `$ERR_STATE_DIR/run/<name>.$$`; a shared `/tmp/err_stderr` let a
   stale stderr attach to a later explanation.
-- **One model at a time.** `err runs` (extra servers on `:11501+`) is gone: a
-  second model replaces the first. Ports stay a contract — `run`/`swap` own
-  `:11500`.
+- **One model at a time.** A second model replaces the first. Ports stay a
+  contract — `run`/`swap` own `:11500`.
 - **Every server err starts gets shut down again.** `err.py:ensure_running`
   (fm) and the engine's `_err_arm_watchdog` (the MLX model on :11500) arm the
   idle watchdog via `python3 err.py --watchdog <pid> [port]`, and
@@ -104,22 +102,19 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
 - **Two system prompts, and they are opposite on purpose.** The question prompt
   asks for a fenced example (that block is what feeds `_ERR_SUGGEST_FILE`); the
   explain prompt forbids one (`err wtf` must never put a command in history).
-  Each has exactly one definition, in `err.py` (`DEFAULT_SYSTEM_PROMPT` /
-  `DEFAULT_QUESTION_PROMPT`); `err.conf` overrides without restating, and
-  `effective_prompt()` owns the precedence (`explain_system_prompt` → legacy
-  `system_prompt` → builtin). `err doctor` shows what is in force via
+  Both live only in `err.conf` (`explain_system_prompt`,
+  `question_system_prompt`; `err config` edits them, `err reset` restores the
+  shipped ones). There is no built-in copy in `err.py`: a missing or empty key
+  makes err refuse to answer. `err doctor` reads them via
   `err.py --prompt explain|question` (`origin<TAB>text`) — if you add a prompt,
   wire it into that flag, not into a second parser in zsh.
-- **Plain stdout is captured only when `capture = on`.** The default is off:
-  `preexec`/`precmd` bracket a command but its bytes go straight to the tty, so
-  output reaches the model only through `cmd | err wtf` (`_ERR_STDIN_PIPED`,
-  err.py reads its own stdin). With `capture = on`, `_err_capture_start` tees
-  fd 1/2 into `_ERR_STDOUT_FILE` for that command and `_err_capture_stop`
-  restores the saved terminal fds in `precmd`. That is exactly the trade-off:
-  fd 1 is a pipe while the command runs, so colours, pagers and full-screen
-  programs (less/vim/btop) break. Keep the capture opt-in; do not turn it on by
-  default. `errc` (a tee wrapper) is still gone. `_err_fresh` gives the question
-  path its context for exactly one turn.
+- **Never capture by tee/redirection.** A shell hook cannot tee stdout while
+  preserving fd 1 as a TTY; that breaks TUIs (pi, claude, vim, etc.). The
+  opt-in `capture = pty` mode is bootstrapped by `lib/err-pty-startup.zsh`
+  before other `.zshrc` integrations; it starts `lib/err-pty-proxy.py` around
+  the interactive shell. Tokenized OSC markers delimit command output; test
+  TTY semantics and marker splitting whenever the proxy changes. Legacy
+  `capture = on` is ignored.
 - **Watchdog pids must be the listener, not `$!`.** `mlx_vlm.server` is a uv
   shim that spawns the real server as a child, so SIGTERM to `$!` leaves the
   model (and its RAM) behind. `_err_arm_watchdog` resolves the pid with
@@ -137,12 +132,12 @@ rebuild the launch arrays, and `temperature` / `max_tokens` are shared by
 - **`model_id` in err.conf is an fm value (`system` / `pcc`), never an MLX id.**
   Sending it to the :11500 server makes mlx-vlm try to download a repo named
   `system`. `mlx_model_id()` resolves the served model from `last-model` /
-  `default-model`, so the manager and the explain layer cannot drift again.
+  `last-model`, so the manager and the explain layer cannot drift again.
 - **Ports are a contract.** `err run`/`err swap` own `:11500` (every client,
   including err's own `backend = mlx`, reads that). `status --json` and
   `endpoint` were folded into `err info` / `info --json`.
 - **The chosen model must reach the explain layer.** `err default` / `err switch`
-  write `$ERR_STATE_DIR/default-model` *and* rewrite `backend` in `err.conf`
+  record `$ERR_STATE_DIR/last-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from
   `fm` while the menu shows another model as default — that was a real bug.
   There is no `err default` any more: `last-model` *is* the default, and

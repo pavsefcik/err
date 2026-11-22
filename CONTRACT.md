@@ -1,4 +1,4 @@
-# err v0.601.0 — internal contract
+# err v0.602.0 — internal contract
 
 Single source of truth for the seams between the three layers. Read before editing
 `err-launcher.zsh`, `err.py`, or `err-models.zsh`.
@@ -21,13 +21,12 @@ Single source of truth for the seams between the three layers. Read before editi
 | `err.py` | explain / ask / sessions | `python3 err.py [args]` |
 | `err-models.zsh` | ported marv-mlx engine, run as a subprocess | `zsh err-models.zsh <verb> [args]` |
 | `lib/err-helpers.zsh` | engine helpers (sourced by `err-models.zsh` only) | `_err_*` |
-| `err.conf` | explain/ask config (prompts, backend) | key = value |
-| `$ERR_STATE_DIR/config.zsh` | model-launch config (hand-edited; `err config` opens the user config) | sourced by engine |
-| `VERSION` | `0.601.0` | |
+| `$ERR_STATE_DIR/err.conf` | the one config (seeded from the repo `err.conf`; `err config` opens it) | key = value |
+| `VERSION` | `0.602.0` | |
 
 `ERR_STATE_DIR` defaults to `$HOME/.cache/err`. `~/.cache/marv` is the marv
 harness's and is never written by err; a first-run migration copies err's own
-files (`config.zsh`, `sessions/`, catalog) out of the old shared
+files (`sessions/`, catalog) out of the old shared
 `~/.cache/marv/mlx` and leaves apc/logs/venvs behind. Sessions live in
 `$ERR_STATE_DIR/sessions/`.
 
@@ -59,33 +58,29 @@ through the `err` function — never `eval` — so a menu row and the typed comm
 are the same code path. Off a terminal the engine prints the
 rows instead, which is what scripts and the tests consume.
 
-**Output reaches the model two ways.** A pipe (`cmd | err wtf`): the launcher
-records the producing side (`_err_is_ours` only sees err when it is the *first*
-word), sets `_ERR_STDIN_PIPED=1`, and err.py reads its own stdin. Or the opt-in
-capture (`capture = on` in err.conf): `preexec` tees fd 1/2 into
-`_ERR_STDOUT_FILE` for that command and `precmd` restores the saved terminal
-fds. That tee is a real trade-off — fd 1 is a pipe while the command runs, so
-colours, pagers and full-screen programs break. Off by default.
+**Output reaches the model through the PTY proxy only.** A pipeline ending in
+`| err …` is not recorded at all. With `capture = pty`, the first-line `.zshrc` bootstrap in
+`lib/err-pty-startup.zsh` replaces the interactive shell with the stdlib proxy
+in `lib/err-pty-proxy.py`; the proxy starts a child shell on a PTY, relays bytes
+to the user's terminal, and captures bytes between tokenized OSC markers from
+`preexec`/`precmd`. Captures are capped at 64 KiB per command and skipped for
+alternate-screen TUIs. The question path attaches the last captured output for
+exactly one turn. `err record` displays the current command, exit code and
+captured output locally without consuming that fresh context. Legacy
+`capture = on` is ignored.
 
-Captures are bounded (`output_lines`, default 40; 3000 chars) and cleared at
-`preexec` for every command err did not run itself. The question path attaches
-the last command plus whatever was piped in as context, for exactly one turn:
-the launcher clears `_ERR_LAST_FRESH` once err has answered.
+## Prompts — one definition, in err.conf
 
-## Prompts — one definition each, err.conf only overrides
-
-The two system prompts are the defaults in `err.py` (`DEFAULT_SYSTEM_PROMPT` for
-explain, `DEFAULT_QUESTION_PROMPT` for questions). They are **not** repeated in
-`err.conf`: a copy in two files drifts the moment one is edited, and nothing
-would notice. `err doctor` prints the prompt in force plus its origin
-(`builtin` / `custom`) by asking `python3 err.py --prompt explain|question`,
-which emits `origin<TAB>text` — the precedence lives in one place
-(`effective_prompt`), so the engine never re-implements it.
+The two system prompts (`explain_system_prompt`, `question_system_prompt`) live
+only in `$ERR_STATE_DIR/err.conf`. `err config` edits them; `err reset` restores
+the shipped text. `err.py` has no copy: a missing or empty key makes err refuse
+to answer. `err doctor` shows the prompt in force by asking
+`python3 err.py --prompt explain|question`, which emits `origin<TAB>text` — the
+lookup lives in one place (`effective_prompt`), so the engine never re-implements it.
 
 ```
-explain_system_prompt  = …   optional override; wins
-system_prompt          = …   legacy name of the above, still read
-question_system_prompt = …   optional override
+explain_system_prompt  = …   in err.conf (err config edits it)
+question_system_prompt = …   in err.conf (err config edits it)
 ```
 
 The split is not cosmetic: the *question* prompt asks for one example command
@@ -94,6 +89,12 @@ that is what makes `suggest = history|ask` useful. The *explain* prompt must do
 the opposite — it says "Do not include a code block" — or `err wtf` could put
 a command into your history. Keep a prompt (or a prompt override) on the right
 side of that line: the task differs, not the topic.
+
+The prompt is advice, not a guarantee, so the fenced line goes through
+`zsh_safe_command()` before it reaches `_ERR_SUGGEST_FILE`: a literal
+double-quoted span containing `!` becomes single quoted, anything else gets
+`!` escaped (`\!`), and `! cmd` history negation is left alone. No suggestion
+may leave an interactive zsh at `dquote>` or evaluate as an event reference.
 
 `err.conf` → `prompt_success` / `prompt_not_found` / `prompt_fail` /
 `prompt_unknown` are **not** system prompts: `build_explain_user` appends one of
@@ -106,8 +107,7 @@ them to the user message depending on the exit code.
 | `_ERR_LAST_CMD` | the command to explain |
 | `_ERR_LAST_EXIT` | its exit code (`-1` = unknown) |
 | `_ERR_STDERR_FILE` | file holding captured stderr (may not exist) |
-| `_ERR_STDOUT_FILE` | command output: written by the opt-in capture (`capture = on`), truncated at every `preexec` |
-| `_ERR_STDIN_PIPED` | `1` when the recorded line ends in `| err …`: err.py may read its own stdin (bounded) |
+| `_ERR_STDOUT_FILE` | last command output: PTY proxy capture file or empty when capture is off; cleared before each command |
 | `_ERR_LAST_FRESH` | `1` while the last command has not been explained/asked about |
 | `_ERR_SESSION_ID` | uuid, one per shell, minted by the launcher |
 | `_ERR_SUGGEST_FILE` | err.py writes the recommended command here (or nothing) |
@@ -171,15 +171,12 @@ It is offered by `_err_pick_installed`, `_err_pick_catalog` and
 `stop` and `info`. `err list` stays HF-only (machine-readable) and
 `err info --json` keeps reporting `:11500` for OpenAI clients.
 
-With no `default-model` file, `_err_default_model` derives the default from
-`err.conf`: `backend = fm|pcc` means the Apple model is the default (marked `*`),
-which matches what a bare `err` already uses. Only an explicit
-`err default <model>` overrides that.
+The default is `last-model`: the model you last ran or switched to. With no
+`last-model`, `_err_default_model` derives it from `err.conf`: `backend = fm|pcc`
+means the Apple model. There is no `default-model` file any more.
 
-`err switch <model>` is a move, not a one-off: it starts the model **and**
-writes `default-model` (plus `backend = mlx`), so the pick survives the shell.
-It used to update only `last-model`, which is why the next err call could go
-back to the model you had just switched away from.
+`err switch <model>` is a move: it starts the model and records it in
+`last-model` (plus `backend = mlx`), so the pick survives the shell.
 
 ## err.conf keys
 
@@ -192,8 +189,8 @@ mlx_base_url   = http://127.0.0.1:11500
 mlx_autostart  = on                 (start the saved model when :11500 is down;
                                     off = print "err run <model>" instead)
 idle_timeout_minutes = 10           (shut a server err started down when idle)
-explain_system_prompt = …           (optional; default in err.py — see Prompts)
-question_system_prompt = …          (optional; default in err.py)
+explain_system_prompt = …           (required; err refuses to answer without it)
+question_system_prompt = …          (required; err refuses to answer without it)
 history_turns  = 6                  (verbatim turns kept in the window)
 suggest        = ask | history | off (what to do with the recommended command)
 ```

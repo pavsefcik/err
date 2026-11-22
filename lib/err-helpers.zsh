@@ -70,7 +70,6 @@ _err_migrate_legacy_state() {
   local old="$HOME/.cache/ymlx"
   local new="${ERR_STATE_DIR:-$HOME/.cache/err}"
   _err_migrate_state_dir "$old" "$new"
-  _err_migrate_config "$new/config.zsh"
   _err_migrate_zshrc "$HOME/.zshrc"
   _err_migrate_pi_files
   return 0
@@ -83,18 +82,6 @@ _err_migrate_state_dir() {
     mkdir -p "${new:h}"
     cp -R "$old" "$new" 2>/dev/null && \
       print -u2 "err: migrated state $old -> $new"
-  fi
-}
-
-# Rewrite the managed-block markers and legacy `YMLX_*` names in config.zsh.
-_err_migrate_config() {
-  local cf="$1"
-  [[ -f "$cf" ]] || return 0
-  if grep -q '^# >>> ymlx-managed' "$cf" 2>/dev/null; then
-    sed -i '' 's/^# >>> ymlx-managed/# >>> err-managed/; s/^# <<< end ymlx-managed/# <<< end err-managed/' "$cf"
-  fi
-  if grep -q '^YMLX_' "$cf" 2>/dev/null; then
-    sed -i '' 's/^\(YMLX_\)/ERR_/' "$cf"
   fi
 }
 
@@ -729,7 +716,7 @@ _err_apply_launch_thinking() {
   spec="${spec#*$'\t'}"
   markers="${spec%%$'\t'*}"
   _err_flag_set "$name" --enable-thinking 0
-  [[ "${ERR_QUICK_THINKING:-default}" == "on" ]] \
+  [[ "${ERR_THINKING:-default}" == "on" ]] \
     && _err_flag_set "$name" --enable-thinking 1
   if [[ "$markers" == "bracket" ]]; then
     _err_replace_or_append "$name" --thinking-start-token "[THINK]"
@@ -744,7 +731,7 @@ _err_apply_launch_thinking() {
 # Without it every chat turn re-prefills the whole conversation (the server log
 # shows cached_tokens=0), so long contexts stall on prefill each turn.
 #
-# Pre-set values win, so config.zsh / the shell can override anything. Opt out
+# Pre-set values win, so err.conf / the shell can override anything. Opt out
 # with ERR_APC=0 (or APC_ENABLED=0). The disk tier is pointed under
 # err's state dir instead of mlx-vlm's global ~/.cache/mlx-vlm/apc.
 _err_export_apc_env() {

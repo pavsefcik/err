@@ -19,7 +19,6 @@ _err_engine_main() {
   local log_dir="$state_dir/logs"
   local config_file="$state_dir/err.conf"
 
-  typeset -ga ERR_CHAT_FLAGS=( --max-tokens 2048 --temperature 0.7 )
   typeset -ga ERR_SERVER_FLAGS=()
 
   # Version query: handled before the tool check so it works even on a
@@ -103,11 +102,8 @@ _err_engine_main() {
   fi
 
 
-  typeset -g ERR_QUICK_THINKING="default"
-  typeset -g ERR_QUICK_TEMP=""
-  typeset -g ERR_QUICK_MAX_TOKENS=""
-  typeset -g ERR_QUICK_SYSTEM_PROMPT=""
-  typeset -g ERR_QUICK_MOE_CACHE=""
+  typeset -g ERR_THINKING="default"
+  typeset -g ERR_MAX_TOKENS=""
   typeset -g _ERR_STTY_SAVED=""
   _ERR_STTY_SAVED="$(stty -g 2>/dev/null)"
 
@@ -196,31 +192,6 @@ _err_engine_main() {
     [[ -z "$buf" ]] && buf="$def"
     print -r -- "$buf"
   }
-
-  # Run a command under a one-line title.
-  _err_apply_quick() {
-    # Thinking is per-model-family and applied at launch / per request (see
-    # _err_apply_launch_thinking), so it is NOT written
-    # into ERR_SERVER_FLAGS here — that would be a second source of truth.
-    if [[ -n "$ERR_QUICK_TEMP" ]]; then
-      _err_replace_or_append ERR_CHAT_FLAGS --temperature "$ERR_QUICK_TEMP"
-      # mlx_vlm.server has no server-level temperature flag — temperature is a
-      # per-request field, which err.py sends (and API clients send).
-    fi
-    if [[ -n "$ERR_QUICK_MAX_TOKENS" ]]; then
-      _err_replace_or_append ERR_CHAT_FLAGS --max-tokens "$ERR_QUICK_MAX_TOKENS"
-      _err_replace_or_append ERR_SERVER_FLAGS --max-tokens "$ERR_QUICK_MAX_TOKENS"
-    fi
-    # Streaming MoE expert-cache budget (GiB). Non-MoE models ignore it.
-    if [[ -n "$ERR_QUICK_MOE_CACHE" ]]; then
-      export ERR_MOE_CACHE_GB="$ERR_QUICK_MOE_CACHE"
-    fi
-    # System prompts are per-request only: mlx_vlm has no --system-prompt flag
-    # (server or chat), and ERR_CHAT_FLAGS is informational, so there is
-    # nothing to write here — err.py injects ERR_QUICK_SYSTEM_PROMPT
-    # into the request messages and API clients pass it in the body.
-  }
-
 
   # Self-heal the APC sitecustomize in the mlx-vlm uv tool env: a
   # `uv tool update` reinstalls the env and drops it. With it in place, every
@@ -559,15 +530,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   }
 
   _err_default_model() {
-    # There is no `err default` any more: the model you last ran or swapped to
-    # IS the default, which is also what err.py answers from.
-    local f="$state_dir/default-model" m="" b="" last="$state_dir/last-model"
-    if [[ -r "$last" ]]; then
-      m="$(<"$last")"; m="${m//[[:space:]]/}"
-    fi
-    if [[ -z "$m" && -r "$f" ]]; then
-      m="$(<"$f")"; m="${m//[[:space:]]/}"
-    fi
+    # The model you last ran or swapped to IS the default (last-model), which
+    # is also what err.py answers from. No separate default file.
+    local m="" b=""
+    m=$(_err_last_model)
     if [[ -z "$m" && -r "$(_err_conf_path)" ]]; then
       b=$(grep -E '^[[:space:]]*backend[[:space:]]*=' "$(_err_conf_path)" 2>/dev/null \
         | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
@@ -588,15 +554,9 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
 
   _ERR_FM_LABEL="apple-fm  (Apple on-device)"
 
-  # Rewrite one `key = value` line in err.conf, leaving every other line
-  # untouched. This is how `err run`/`err swap` reach the explain layer:
-  # err.conf -> backend is what err.py actually reads.
-  # Tests and multi-profile setups can point the whole stack at another file.
-  # ── one config file ────────────────────────────────────────────────
-  # `$ERR_STATE_DIR/err.conf`, seeded from the repo template on first run. Flat
-  # `key = value`, so err.py (stdlib) and this engine read the same file. Flags
-  # are repeated `server_flag = --kv-bits 8` lines instead of a zsh array —
-  # which is why config.zsh is gone: one file, one vocabulary, no managed block.
+  # One config file: $ERR_STATE_DIR/err.conf (ERR_CONF overrides the path),
+  # seeded from the repo template on first run. Flat `key = value`, read by
+  # err.py and by this engine alike.
   _err_conf_path() { print -r -- "${ERR_CONF:-$config_file}" }
 
   _err_conf_get() {
@@ -622,73 +582,24 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     ' "$f" > "$tmp" && mv "$tmp" "$f"
   }
 
-  # Append a documented default for a key a pre-upgrade err.conf predates.
-  _err_conf_add() {  # file, key, block
-    local f="$1" key="$2" block="$3"
-    [[ -r "$f" ]] || return 0
-    # Braces matter: `$key[` parses as an array subscript.
-    grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$f" 2>/dev/null && return 0
-    print -r -- "" >> "$f"
-    print -r -- "$block" >> "$f"
-  }
-
-  # Keys added after the one-file config shipped. An existing err.conf is the
-  # user's file: only missing keys are appended, never an existing value.
-  _err_conf_upgrade() {
-    local f="$1"
-    _err_conf_add "$f" capture $'# terminal capture: on = err sees each command\'s output (fd 1 becomes a\n# pipe, so colours, pagers and full-screen programs break)\ncapture = off'
-    _err_conf_add "$f" apc_total_gb $'# total prefix-cache cap, GiB (0 = no total cap)\napc_total_gb = 6'
-    _err_conf_add "$f" apc_max_age_days $'# delete prefix-cache entries untouched for this many days (0 = keep)\napc_max_age_days = 7'
-  }
-
-  # First run: copy the template, then lift an old config.zsh across once (its
-  # managed block and flag arrays become keys here), leaving it in place so a
-  # downgrade still finds it.
+  # Copy the repo template to the state dir on first run.
   _err_conf_seed() {
-    local f old="$state_dir/config.zsh" line k v kv
-    f=$(_err_conf_path)      # ERR_CONF wins, then the state copy
-    if [[ -e "$f" ]]; then
-      _err_conf_upgrade "$f"
-      return 0
-    fi
+    local f; f=$(_err_conf_path)
+    [[ -e "$f" ]] && return 0
     mkdir -p "${f:h}" 2>/dev/null
     if [[ -r "$_ERR_SRC_DIR/err.conf" ]]; then
       cp -f "$_ERR_SRC_DIR/err.conf" "$f" 2>/dev/null || return 1
     else
       : > "$f" || return 1
     fi
-    [[ -r "$old" ]] || return 0
-    kv=$(zsh -f -c '
-      source "$1" 2>/dev/null
-      [[ -n "${ERR_QUICK_THINKING:-}" && "$ERR_QUICK_THINKING" != default ]] && print -r -- "thinking=$ERR_QUICK_THINKING"
-      [[ -n "${ERR_QUICK_TEMP:-}" ]] && print -r -- "temperature=$ERR_QUICK_TEMP"
-      [[ -n "${ERR_QUICK_MAX_TOKENS:-}" ]] && print -r -- "max_tokens=$ERR_QUICK_MAX_TOKENS"
-      [[ -n "${ERR_QUICK_SYSTEM_PROMPT:-}" ]] && print -r -- "chat_system_prompt=$ERR_QUICK_SYSTEM_PROMPT"
-      [[ -n "${ERR_QUICK_MOE_CACHE:-}" ]] && print -r -- "moe_cache_gib=$ERR_QUICK_MOE_CACHE"
-      local fl
-      for fl in "${ERR_CHAT_FLAGS[@]}"; do [[ -n "$fl" ]] && print -r -- "chat_flag=$fl"; done
-      for fl in "${ERR_SERVER_FLAGS[@]}"; do [[ -n "$fl" ]] && print -r -- "server_flag=$fl"; done
-    ' _ "$old" 2>/dev/null)
-    [[ -z "$kv" ]] && return 0
-    for line in ${(f)kv}; do
-      k="${line%%=*}"; v="${line#*=}"
-      case "$k" in
-        chat_flag|server_flag) print -r -- "$k = $v" >> "$f" ;;
-        *) _err_conf_set "$k" "$v" ;;
-      esac
-    done
-    print -u2 "err: config is now $f (old config.zsh left in place)"
   }
 
-  # Load the file into the variables the launch path already uses, so nothing
-  # downstream changes. Repeated flag lines rebuild the arrays.
+  # Load the keys the engine acts on. Everything else is read by err.py.
   _err_load_config() {
     _err_conf_seed
     local f; f=$(_err_conf_path)
-    ERR_QUICK_THINKING="default"
-    ERR_QUICK_TEMP=""; ERR_QUICK_MAX_TOKENS=""
-    ERR_QUICK_SYSTEM_PROMPT=""; ERR_QUICK_MOE_CACHE=""
-    typeset -ga ERR_CHAT_FLAGS=( --max-tokens 2048 --temperature 0.7 )
+    ERR_THINKING="default"
+    ERR_MAX_TOKENS=""
     typeset -ga ERR_SERVER_FLAGS=()
     if [[ -r "$f" ]]; then
       local line k v
@@ -699,21 +610,19 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         k="${k//[[:space:]]/}"
         v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
         case "$k" in
-          thinking)           ERR_QUICK_THINKING="${v:-default}" ;;
-          temperature)        ERR_QUICK_TEMP="$v" ;;
-          max_tokens)         ERR_QUICK_MAX_TOKENS="$v" ;;
-          chat_system_prompt) ERR_QUICK_SYSTEM_PROMPT="$v" ;;
-          moe_cache_gib)      ERR_QUICK_MOE_CACHE="$v" ;;
-          apc_enabled)        export APC_ENABLED="$v" ;;
-          apc_disk_max_gb)    export APC_DISK_MAX_GB="$v" ;;
-          apc_total_gb)       export ERR_APC_TOTAL_GB="$v" ;;
-          apc_max_age_days)   export ERR_APC_MAX_AGE_DAYS="$v" ;;
-          chat_flag)          ERR_CHAT_FLAGS+=( ${=v} ) ;;
-          server_flag)        ERR_SERVER_FLAGS+=( ${=v} ) ;;
+          thinking)         ERR_THINKING="${v:-default}" ;;
+          max_tokens)       ERR_MAX_TOKENS="$v" ;;
+          moe_cache_gib)    export ERR_MOE_CACHE_GB="$v" ;;
+          apc_enabled)      export APC_ENABLED="$v" ;;
+          apc_disk_max_gb)  export APC_DISK_MAX_GB="$v" ;;
+          apc_total_gb)     export ERR_APC_TOTAL_GB="$v" ;;
+          apc_max_age_days) export ERR_APC_MAX_AGE_DAYS="$v" ;;
+          server_flag)      ERR_SERVER_FLAGS+=( ${=v} ) ;;
         esac
       done < "$f"
     fi
-    _err_apply_quick
+    [[ -n "$ERR_MAX_TOKENS" ]] && \
+      _err_replace_or_append ERR_SERVER_FLAGS --max-tokens "$ERR_MAX_TOKENS"
   }
 
   _err_effective_backend() {
@@ -1151,11 +1060,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     return 0
   }
 
-  # err switch [model] — stop whatever serves :11500 and start another, and
-  # KEEP that choice: a switch is a move, not a one-off. The pick is written to
-  # default-model as well, otherwise the next err call would fall back to the
-  # model you just switched away from (mlx_model_id reads last-model, and the
-  # menus/`err ensure` read default-model).
+  # err switch [model] — stop whatever serves :11500 and start another. The
+  # model that starts is recorded in last-model, which makes it the default.
   _err_headless_switch() {
     # There is nothing to swap *from* when nothing is running: starting the
     # first model is `err run`.
@@ -1170,7 +1076,6 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       model=$(_err_pick_installed "err swap" swap 1 "$cur") || return 1
     fi
     _err_headless_run "$model" || return $?
-    print -r -- "$model" > "$state_dir/default-model"
     _err_point_backend_at "$model"
   }
 
@@ -1220,7 +1125,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   #   nothing there        -> start it
   #   another model there  -> stop every err server, start this one on :11500
   #   this model there     -> wait for it to finish loading, change nothing
-  # Model comes from default-model (then last-model) when the arg is omitted.
+  # Model comes from last-model (then the backend) when the arg is omitted.
   _err_headless_ensure() {
     local model="${1:-}" pid port cur unsupported
     [[ -z "$model" ]] && model=$(_err_default_model)
@@ -1378,19 +1283,18 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
 
     # 3. the prompts actually in force. A hand-edited prompt is otherwise
     # invisible: every answer degrades and nothing says why. err.py owns the
-    # precedence (explain_system_prompt -> legacy system_prompt -> builtin), so
-    # ask it rather than re-implementing that in zsh.
-    local pkind p_out p_origin p_text
+    # lookup rules (required prompts in err.conf), so ask it rather than
+    # re-implementing that in zsh.
+    local pkind p_out p_text
     for pkind in explain question; do
       if p_out=$(python3 "$_ERR_SRC_DIR/err.py" --prompt "$pkind" 2>/dev/null) \
           && [[ -n "$p_out" ]]; then
-        p_origin="${p_out%%$'\t'*}"; p_text="${p_out#*$'\t'}"
+        p_text="${p_out#*$'\t'}"
         (( ${#p_text} > 58 )) && p_text="${p_text[1,58]}…"
-        row ok "prompt-$pkind" "$p_origin — $p_text"
+        row ok "prompt-$pkind" "err.conf — $p_text"
       else
-        row warn "prompt-$pkind" "could not read the effective prompt" \
-          "python3 $_ERR_SRC_DIR/err.py --prompt $pkind"
-        (( warnings++ ))
+        row fail "prompt-$pkind" "missing or empty in err.conf" "err reset"
+        (( problems++ ))
       fi
     done
 
@@ -1687,6 +1591,23 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   }
 
   # `err config` — the one file, opened in your editor. No submenus.
+  # err reset [-y] — put the shipped err.conf back. The file being replaced is
+  # kept as err.conf.bak, so a hand-tuned value is one copy away.
+  _err_headless_reset() {
+    local f src="$_ERR_SRC_DIR/err.conf" yes=0
+    [[ "${1:-}" == (-y|--yes) ]] && yes=1
+    f=$(_err_conf_path)
+    [[ -r "$src" ]] || { print -u2 "err: shipped config not found: $src"; return 1; }
+    if (( ! yes )); then
+      _err_confirm "Reset $f to the shipped config?\nThe current file is kept as $f.bak" \
+        || { print "aborted"; return 1; }
+    fi
+    mkdir -p "${f:h}" 2>/dev/null
+    [[ -e "$f" ]] && { cp -f "$f" "$f.bak" 2>/dev/null || return 1; }
+    cp -f "$src" "$f" || return 1
+    _err_say "reset $f (previous copy: $f.bak)"
+  }
+
   _err_headless_config() {
     local f; f=$(_err_conf_path)
     [[ -r "$f" ]] || { print -u2 "err: config not found: $f"; return 1; }
@@ -1728,7 +1649,9 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "err download <model>|download model(s)"
     print -r -- "err remove <model>|remove model(s)"
     print -r -- "err config|edit the config file"
+    print -r -- "err reset|restore the shipped config"
     print -r -- "err cleanup|clear cached state"
+    print -r -- "err record|show the last recorded command and output"
     print -r -- "err uninstall|remove err"
     print -r -- "err doctor|check the install"
   }
@@ -1928,6 +1851,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       ensure)     _err_headless_ensure   "$@" ;;
       remove|rm)  _err_headless_remove   "$@" ;;
       config)     _err_headless_config   "$@" ;;
+      reset)      _err_headless_reset    "$@" ;;
       uninstall)  _err_headless_uninstall "$@" ;;
       doctor)     _err_headless_doctor    "$@" ;;
       stop)       _err_headless_stop     "$@" ;;
