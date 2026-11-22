@@ -1,8 +1,14 @@
 #!/bin/sh
 # err installer — v0.602.0
 #
-# Usage (from an err checkout):
-#   sh install.sh
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/pavsefcik/err/main/install.sh | sh
+#   sh install.sh            (from a checkout)
+#
+# Piped through curl there is no checkout next to the script, so the installer
+# fetches the latest release snapshot into $ERR_DIR (default ~/.err) and re-runs
+# itself from there. From a checkout it installs in place, which is also how an
+# existing install is re-run.
 #
 # No Xcode Command Line Tools, no Homebrew, no compiler. It installs the tools
 # err needs the brew-free way: uv from Astral's standalone installer and
@@ -14,6 +20,8 @@
 # PATH line).
 #
 # Environment:
+#   ERR_DIR                    install directory for a curl install (default $HOME/.err)
+#   ERR_REF                    git ref to download (default: latest release tag, else main)
 #   ERR_SKIP_HARDWARE_CHECK=1  skip the Apple Silicon / macOS 26 preflight
 #   ERR_NO_ZSH=1               do not modify ~/.zshrc
 #   ERR_DRY_RUN=1              preflight and print the plan, install nothing
@@ -45,13 +53,16 @@ usage() {
   cat <<'USAGE'
 err installer
 
-usage: install.sh [--dry-run] [--no-zsh] [--help]
+usage: curl -fsSL https://raw.githubusercontent.com/pavsefcik/err/main/install.sh | sh
+       install.sh [--dry-run] [--no-zsh] [--help]
 
   --dry-run   print the plan without installing anything
   --no-zsh    do not modify ~/.zshrc
   --help      show this help
 
 environment:
+  ERR_DIR                     install directory for a curl install (default ~/.err)
+  ERR_REF                     git ref to download (default: latest release tag, else main)
   ERR_SKIP_HARDWARE_CHECK=1   skip the Apple Silicon / macOS 26 preflight
   ERR_NO_ZSH=1                do not modify ~/.zshrc
   ERR_DRY_RUN=1               same as --dry-run
@@ -97,14 +108,88 @@ ver_ge() {
 }
 
 # ---- Resolve the err checkout ------------------------------------------------
-# This installer only works from a checkout: it wires the launcher that sits
-# next to it. There is no tarball fetch step (unlike marv-mlx) because err's
-# launcher, engine and config must stay together in one directory.
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) \
-  || die "could not resolve the directory install.sh is running from."
-[ -f "$script_dir/err-launcher.zsh" ] || die \
-  "err-launcher.zsh not found next to install.sh ($script_dir) — run install.sh from an err checkout."
-repo_dir="$script_dir"
+# err's launcher, engine and config must stay together in one directory, so the
+# installer always runs from a real checkout. Two ways to get one:
+#
+#   sh install.sh   from a checkout — install in place (also how a re-run works)
+#   curl ... | sh   no checkout — unpack a snapshot into $ERR_DIR, then re-run
+#                   this script from there, so every path it bakes in is final
+#
+# Flags are already folded into the environment, so the hand-off needs no args.
+ERR_GH_REPO="pavsefcik/err"
+
+is_checkout() { [ -n "${1:-}" ] && [ -f "$1/err-launcher.zsh" ]; }
+
+repo_dir=""
+if [ -f "${0:-}" ]; then
+  _self=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || _self=""
+  is_checkout "$_self" && repo_dir="$_self"
+fi
+
+if [ -z "$repo_dir" ]; then
+  # Piped through curl: there is no checkout. A dry run must not write to the
+  # machine, so it unpacks into a temp dir instead of $ERR_DIR.
+  if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
+    repo_dir=$(mktemp -d "${TMPDIR:-/tmp}/err-dryrun.XXXXXX") \
+      || die "could not create a temp directory for the dry run."
+    says "dry run — source is unpacked into $repo_dir, nothing else is touched"
+    fetch=1
+  else
+    repo_dir="${ERR_DIR:-$HOME/.err}"
+    if ! is_checkout "$repo_dir"; then
+      fetch=1
+    elif [ -d "$repo_dir/.git" ]; then
+      # A git clone at $ERR_DIR belongs to the user: never overwrite it, just
+      # install from it (git pull is theirs to run).
+      says "using the git checkout in $repo_dir"
+      fetch=0
+    else
+      # A previous curl install: refresh it, so re-running the one line
+      # updates the source. Config and state live in ~/.cache/err, not here.
+      says "refreshing the managed install in $repo_dir"
+      fetch=1
+    fi
+  fi
+
+  if [ "$fetch" = "1" ]; then
+    # Released tag first, so a curl install lands on a release rather than a
+    # moving branch; main is the fallback when the API is unreachable.
+    ref="${ERR_REF:-}"
+    if [ -z "$ref" ]; then
+      ref=$(curl -fsSL "https://api.github.com/repos/$ERR_GH_REPO/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || ref=""
+    fi
+    [ -n "$ref" ] || ref="main"
+
+    step "Fetching err ($ref) into $repo_dir …"
+    _tmp=$(mktemp -d "${TMPDIR:-/tmp}/err-src.XXXXXX") \
+      || die "could not create a temp directory for the err snapshot."
+    if ! curl -fsSL "https://codeload.github.com/$ERR_GH_REPO/tar.gz/$ref" -o "$_tmp/err.tar.gz"; then
+      rm -rf "$_tmp"
+      die "could not download the err snapshot ($ref) from codeload.github.com — check your network and re-run."
+    fi
+    mkdir -p "$_tmp/src" || { rm -rf "$_tmp"; die "could not create $_tmp/src"; }
+    if ! tar -xzf "$_tmp/err.tar.gz" -C "$_tmp/src" --strip-components=1; then
+      rm -rf "$_tmp"
+      die "could not unpack the err snapshot ($ref)."
+    fi
+    is_checkout "$_tmp/src" || { rm -rf "$_tmp"; die \
+      "the downloaded snapshot has no err-launcher.zsh — refusing to continue."; }
+    # Swap in the snapshot so files dropped upstream do not linger. Done after
+    # the download is verified, so a network failure never empties the install.
+    if [ "${ERR_DRY_RUN:-0}" = "1" ]; then
+      says "dry run — snapshot unpacked, leaving the install directory untouched"
+    else
+      rm -rf "$repo_dir"
+      mv "$_tmp/src" "$repo_dir" || { rm -rf "$_tmp"; die "could not move the snapshot into $repo_dir."; }
+      says "unpacked $ref into $repo_dir"
+    fi
+    rm -rf "$_tmp"
+  fi
+
+  step "Continuing with the installer in $repo_dir"
+  exec sh "$repo_dir/install.sh"
+fi
 
 # ---- 1. Hardware preflight ---------------------------------------------------
 # MLX is Apple-Silicon-only. Fail here, early, instead of halfway through a

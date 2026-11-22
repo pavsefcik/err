@@ -13,19 +13,36 @@ Corrects and explains your last shell command, and runs local MLX models on Appl
 
 ## Install
 
-From an err checkout:
+One line. No Xcode Command Line Tools, no Homebrew, no compiler — it installs
+`uv` (Astral's standalone installer) and `mlx-vlm` (uv tool) only if they are
+missing, and wires the launcher into `~/.zshrc`:
 
 ```sh
-sh install.sh
+curl -fsSL https://raw.githubusercontent.com/pavsefcik/err/main/install.sh | sh
 ```
 
-The installer is idempotent and safe to re-run. It treats the source directory as the install directory (the launcher, engine and config stay together) and:
+There is no checkout to keep around: the installer unpacks the latest release
+into `~/.err` (`ERR_DIR` to override) and runs itself from there, so the
+launcher, engine and config stay together in one directory. Re-running the same
+line repairs and updates that directory.
+
+From a checkout, `sh install.sh` installs in place instead:
+
+```sh
+sh install.sh                 # or: sh install.sh --dry-run
+```
+
+The installer is idempotent and safe to re-run. It:
 
 1. preflights Apple Silicon and macOS 26+;
 2. warns — but does not abort — when `fm` is missing;
 3. installs `uv` (Astral's standalone installer) only if missing — there is no other binary to download;
 4. runs `uv tool install mlx-vlm --with jinja2` only if `mlx_vlm.server` is missing;
 5. adds uv's bin directory to `PATH`, prepends the opt-in PTY startup hook, and sources `err-launcher.zsh` in `~/.zshrc` — wiring is idempotent.
+
+`--dry-run` prints the plan without installing anything (a curl dry run unpacks
+into a temp dir instead of `~/.err`), `--no-zsh` leaves `~/.zshrc` alone, and
+`ERR_DIR` / `ERR_REF` choose the curl-install directory and git ref.
 
 Open a new terminal afterwards (or `source ~/.zshrc`). The older `install.command` only wires the launcher; `install.sh` is the full install.
 
