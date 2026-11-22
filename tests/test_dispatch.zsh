@@ -153,14 +153,14 @@ RPROMPT=""
 
 print "sensible defaults from err.conf"
 _check "history" "$(_err_suggest_mode)" "suggest = history (↑ recalls, no auto-fill)"
-_saved_dir="$_ERR_DIR"
+_saved_conf="${ERR_CONF:-}"
 _tmpdir=$(mktemp -d)
 for _v in off ask history; do
   print "suggest = $_v" > "$_tmpdir/err.conf"
-  _ERR_DIR="$_tmpdir"
+  ERR_CONF="$_tmpdir/err.conf"
   _check "$_v" "$(_err_suggest_mode)" "suggest = $_v parsed"
 done
-_ERR_DIR="$_saved_dir"; rm -rf "$_tmpdir"
+ERR_CONF="$_saved_conf"; rm -rf "$_tmpdir"
 
 print "capture flag"
 _capconf=$(mktemp)
@@ -170,6 +170,13 @@ _check "0" "$(_err_capture_mode; print $?)" "capture = on parses"
 print "capture = off" > "$_capconf"
 _check "1" "$(_err_capture_mode; print $?)" "capture = off is the default"
 rm -f "$_capconf"
+# The state config is what a real shell reads when ERR_CONF is unset.
+_capstate=$(mktemp -d)
+print "capture = on" > "$_capstate/err.conf"
+_capout=$(ERR_STATE_DIR="$_capstate" ERR_CONF= zsh -f -c \
+  "source '$_ERR_DIR/err-launcher.zsh'; _err_capture_mode; print \$?" 2>&1)
+_check "0" "$_capout" "capture is read from ERR_STATE_DIR/err.conf"
+rm -rf "$_capstate"
 ERR_CONF="$_ERR_DIR/err.conf"
 
 print 're-sourcing (the `reload` alias sources ~/.zshrc again)'

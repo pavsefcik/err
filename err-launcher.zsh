@@ -102,7 +102,7 @@ typeset -g _ERR_RPROMPT_OWNED="${_ERR_RPROMPT_OWNED:-0}"
 _err_capture_mode() {
   local v="${ERR_CAPTURE:-}" f
   if [[ -z "$v" ]]; then
-    f="${ERR_CONF:-$_ERR_DIR/err.conf}"
+    f="${ERR_CONF:-$ERR_STATE_DIR/err.conf}"
     [[ -r "$f" ]] && v=$(grep -E '^[[:space:]]*capture[[:space:]]*=' "$f" 2>/dev/null \
       | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
   fi
@@ -271,7 +271,7 @@ _err_py() {
 _err_suggest_mode() {
   # same precedence as err.py: ERR_SUGGEST, then err.conf, then history
   if [[ -n "${ERR_SUGGEST:-}" ]]; then print -r -- "${ERR_SUGGEST:l}"; return; fi
-  local v="" conf="${ERR_CONF:-$_ERR_DIR/err.conf}"
+  local v="" conf="${ERR_CONF:-$ERR_STATE_DIR/err.conf}"
   [[ -r "$conf" ]] && v=$(grep -E '^[[:space:]]*suggest[[:space:]]*=' \
     "$conf" 2>/dev/null | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
   print -r -- "${v:-history}"
