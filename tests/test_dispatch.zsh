@@ -6,6 +6,11 @@ emulate -L zsh
 set -u
 
 _ERR_DIR="${0:A:h:h}"
+# A developer's shell may itself be a PTY proxy child, which exports
+# ERR_PTY_PROXY_ACTIVE=1 to everything it runs. Inheriting that here would make
+# the capture-default checks below assert the proxy child's answer instead of a
+# plain shell's. Start from a clean capture environment.
+unset ERR_PTY_PROXY_ACTIVE ERR_PTY_TOKEN ERR_PTY_CAPTURE_FILE
 # The menu hands its pick back through $ERR_STATE_DIR/run — keep it out of the
 # real state dir.
 export ERR_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/err-dispatch.XXXXXX")

@@ -150,6 +150,12 @@ def test_zsh_hooks_capture_previous_command(temp):
     env["SHELL"] = "/bin/bash"  # PTY bootstrap must relaunch zsh, not this hint.
     env.pop("ERR_CAPTURE", None)
     env.pop("ERR_CONF", None)
+    # A developer's shell may itself be a PTY proxy child. If these leak in,
+    # the bootstrap sees ERR_PTY_PROXY_ACTIVE=1 and skips starting its own
+    # proxy, so the hooks emit markers with an empty token and capture nothing.
+    env.pop("ERR_PTY_PROXY_ACTIVE", None)
+    env.pop("ERR_PTY_TOKEN", None)
+    env.pop("ERR_PTY_CAPTURE_FILE", None)
     env["ZDOTDIR"] = zdotdir
     pid, master = pty.fork()
     if pid == 0:
