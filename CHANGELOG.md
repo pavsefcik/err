@@ -79,7 +79,9 @@ All notable changes to err are documented here. Format follows
   what the command printed (last 40 lines, 3000 chars). It is off by default
   because fd 1 is a pipe while a command runs: colours, pagers and full-screen
   programs break. The prompts now say err sees captured or piped output, so a
-  model no longer claims ignorance or invents terminal contents.
+  model no longer claims ignorance or invents terminal contents. Existing
+  `err.conf` files gain the new keys (`capture`, `apc_total_gb`,
+  `apc_max_age_days`) on the next load, so `err config` shows them.
 
 ### Fixed
 

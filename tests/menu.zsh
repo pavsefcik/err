@@ -213,6 +213,16 @@ contains "err help" "$_out" "the help row is shown but not pickable"
 not_contains "err chat" "$_out" "the chat row is gone"
 not_contains "err tui" "$_out" "the tui row is gone"
 
+# An err.conf from before a key existed must gain it on the next load, so
+# `err config` can show `capture` instead of the user having to know the key.
+print "config upgrade"
+_oldconf="$(mktemp)"
+print -r -- "backend = mlx" > "$_oldconf"
+ERR_CONF="$_oldconf" zsh "$REPO/err-models.zsh" list >/dev/null 2>&1
+contains "capture = off" "$(<"$_oldconf")" "an older err.conf gains the capture key"
+contains "apc_max_age_days = 7" "$(<"$_oldconf")" "an older err.conf gains the APC age key"
+rm -f "$_oldconf"
+
 # ── cancel must abort, not fall through ───────────────────────────────
 print "cancel"
 _out=$({ no_servers; engine_rows dump run } 2>&1); rc=$?

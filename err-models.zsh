@@ -622,13 +622,35 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     ' "$f" > "$tmp" && mv "$tmp" "$f"
   }
 
+  # Append a documented default for a key a pre-upgrade err.conf predates.
+  _err_conf_add() {  # file, key, block
+    local f="$1" key="$2" block="$3"
+    [[ -r "$f" ]] || return 0
+    # Braces matter: `$key[` parses as an array subscript.
+    grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$f" 2>/dev/null && return 0
+    print -r -- "" >> "$f"
+    print -r -- "$block" >> "$f"
+  }
+
+  # Keys added after the one-file config shipped. An existing err.conf is the
+  # user's file: only missing keys are appended, never an existing value.
+  _err_conf_upgrade() {
+    local f="$1"
+    _err_conf_add "$f" capture $'# terminal capture: on = err sees each command\'s output (fd 1 becomes a\n# pipe, so colours, pagers and full-screen programs break)\ncapture = off'
+    _err_conf_add "$f" apc_total_gb $'# total prefix-cache cap, GiB (0 = no total cap)\napc_total_gb = 6'
+    _err_conf_add "$f" apc_max_age_days $'# delete prefix-cache entries untouched for this many days (0 = keep)\napc_max_age_days = 7'
+  }
+
   # First run: copy the template, then lift an old config.zsh across once (its
   # managed block and flag arrays become keys here), leaving it in place so a
   # downgrade still finds it.
   _err_conf_seed() {
     local f old="$state_dir/config.zsh" line k v kv
     f=$(_err_conf_path)      # ERR_CONF wins, then the state copy
-    [[ -e "$f" ]] && return 0
+    if [[ -e "$f" ]]; then
+      _err_conf_upgrade "$f"
+      return 0
+    fi
     mkdir -p "${f:h}" 2>/dev/null
     if [[ -r "$_ERR_SRC_DIR/err.conf" ]]; then
       cp -f "$_ERR_SRC_DIR/err.conf" "$f" 2>/dev/null || return 1
