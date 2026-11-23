@@ -90,7 +90,7 @@ not_contains "err tui"       "$_out" "err tui is gone"
 _out=$(cmd_out 'err help')
 contains "start a fresh session" "$_out" "err help opens the menu"
 contains "err help" "$_out" "the menu lists err help as a typed command"
-contains "0.602.0" "$(cmd_out 'err version')" "err version prints VERSION"
+contains "$(<"$REPO/VERSION")" "$(cmd_out 'err version')" "err version prints VERSION"
 
 # ── 2. explain + ask reach the model ───────────────────────────────────
 print "explain / ask"

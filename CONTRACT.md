@@ -1,4 +1,4 @@
-# err v0.602.0 — internal contract
+# err v0.603.0 — internal contract
 
 Single source of truth for the seams between the three layers. Read before editing
 `err-launcher.zsh`, `err.py`, or `err-models.zsh`.
@@ -22,7 +22,7 @@ Single source of truth for the seams between the three layers. Read before editi
 | `err-models.zsh` | ported marv-mlx engine, run as a subprocess | `zsh err-models.zsh <verb> [args]` |
 | `lib/err-helpers.zsh` | engine helpers (sourced by `err-models.zsh` only) | `_err_*` |
 | `$ERR_STATE_DIR/err.conf` | the one config (seeded from the repo `err.conf`; `err config` opens it) | key = value |
-| `VERSION` | `0.602.0` | |
+| `VERSION` | `0.603.0` | |
 
 `ERR_STATE_DIR` defaults to `$HOME/.cache/err`. `~/.cache/marv` is the marv
 harness's and is never written by err; a first-run migration copies err's own
@@ -84,8 +84,10 @@ question_system_prompt = …   in err.conf (err config edits it)
 ```
 
 The split is not cosmetic: the *question* prompt asks for one example command
-in a fenced block because `first_fenced_line()` feeds `_ERR_SUGGEST_FILE`, and
-that is what makes `suggest = history|ask` useful. The *explain* prompt must do
+in a fenced block because `last_fenced_line()` feeds `_ERR_SUGGEST_FILE`, and
+that is what makes `suggest = history|ask` useful. The prompt asks the model
+to end its answer with that block; a user-supplied prompt must keep the
+contract or suggestions stop reaching history. The *explain* prompt must do
 the opposite — it says "Do not include a code block" — or `err wtf` could put
 a command into your history. Keep a prompt (or a prompt override) on the right
 side of that line: the task differs, not the topic.
@@ -212,6 +214,9 @@ suggest        = ask | history | off (what to do with the recommended command)
   turns.) The title is redacted like every other persisted field.
 * `turns` — written **only** after a redaction pass (`[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=`,
   `ghp_…`, `sk-…`, `Bearer …` → `«redacted»`).
+* `err resume` rebuilds the conversation on screen after a successful pick: it
+  prints the title and the last `history_turns` turns (the same window the next
+  request carries). Only a TTY gets the replay; piped output stays silent.
 * Pruned: > 7 days old or > 50 sessions, oldest first.
 
 Exit codes: `0` ok, `1` runtime failure, `2` usage error. Data on stdout,

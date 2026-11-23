@@ -4,6 +4,8 @@
 Run from the repository root:  python3 tests/test_err.py
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -115,6 +117,37 @@ def main():
             errmod.first_fenced_line("Try:\n```bash\nls -la\n```\n") == "ls -la",
             "first fenced line extraction",
         )
+        check(
+            errmod.last_fenced_line(
+                "Example:\n```bash\nls\n```\nEnd with the fix:\n```bash\nls -la\n```\n"
+            ) == "ls -la",
+            "the suggestion is the last fenced block",
+        )
+        check(errmod.single_line("first\nsecond\r\nthird") == "first second third",
+              "line breaks collapse to one space")
+        check(errmod.session_question({
+            "q": "Context — the command I just ran:\nCommand: ls\nExit code: 0\n"
+                 "\nQuestion: what is this?"
+        }) == "what is this?", "ask turn keeps only the question")
+        check(errmod.session_question({
+            "q": "Context — the command I just ran:\nCommand: ls -la\nExit code: 0"
+        }) == "explain ls -la", "explain turn rebuilds as explain <command>")
+        resume_buf = io.StringIO()
+        with contextlib.redirect_stdout(resume_buf):
+            errmod.replay_session({
+                "title": "a session",
+                "turns": [
+                    {"q": "first question?", "a": "first answer"},
+                    {"q": "Context — the command I just ran:\nCommand: ls\n"
+                          "\nQuestion: second question?", "a": "second answer"},
+                ],
+            })
+        replay = resume_buf.getvalue()
+        check("resumed: a session" in replay, "resume replay names the session")
+        check("> first question?" in replay and "first answer" in replay,
+              "resume replay restores the first turn")
+        check("> second question?" in replay and "Context —" not in replay,
+              "resume replay strips the context block from ask turns")
         # A suggestion is pasted into an interactive zsh: `!` outside single
         # quotes must never reach the history file raw.
         check(errmod.zsh_safe_command('echo "Greetings from macOS zsh!"')
@@ -378,6 +411,25 @@ def main():
         check("resume 1" in proc.stdout and "ls -la" in proc.stdout,
               "resume row does not carry the session title")
         check(REPO in rows[0], "resume row missing cwd")
+
+        # A title with a raw line break (multi-line question, older session
+        # file) must not split the row: `err resume` prints one row per session.
+        broken_sid = str(uuid.uuid4())
+        with open(session_file(broken_sid), "w") as f:
+            json.dump({
+                "id": broken_sid,
+                "last_used": int(time.time()),
+                "tty": "ttys001",
+                "cwd": REPO,
+                "title": "first line\nsecond line",
+                "turns": [],
+            }, f)
+        proc = run(["resume"])
+        check(proc.returncode == 0, f"resume with a multi-line title failed: {proc.stderr}")
+        check("first line second line" in proc.stdout,
+              "a multi-line session title did not become one line")
+        check("first line\nsecond line" not in proc.stdout,
+              "resume printed a raw line break inside a title")
         ok("resume listing")
 
         # ── token estimate when the server omits usage ───────────────
@@ -530,8 +582,6 @@ def main():
             # With autostart off and no server, the old instruction is printed
             # and err exits 1 instead of hanging or launching.
             os.environ["ERR_MLX_AUTOSTART"] = "off"
-            import io
-            import contextlib
             err_out = io.StringIO()
             raised = 0
             with contextlib.redirect_stderr(err_out):

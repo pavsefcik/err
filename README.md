@@ -6,7 +6,9 @@ Corrects and explains your last shell command, and runs local MLX models on Appl
 
 ## Requirements
 
-- An Apple Silicon Mac (M-series) on macOS 26 or later.
+- An Apple Silicon Mac (M-series) on macOS 26 (Tahoe) or later. macOS 26 is
+  the oldest supported release: the current MLX wheels are built for it. The
+  installer refuses older macOS, non-Apple-Silicon Macs and non-Darwin hosts.
 - For the explain / ask half: Apple Foundation Models, i.e. the `fm` CLI that ships with macOS 27 or later. Without `fm`, err still downloads, runs and serves models — only `err` / `err <question>` are unavailable.
 - Network for the first install and for model downloads; models run offline once cached.
 - No Xcode Command Line Tools, no Homebrew, no compiler required.
@@ -53,7 +55,7 @@ err                            the menu (bare)
 err -h                         the menu as well
 err help                       the menu, typed
 
-err // 0.602.0 // local MLX LLM runner
+err // 0.603.0 // local MLX LLM runner
 
 Available commands:
        err 'question'         ask a question

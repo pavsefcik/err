@@ -3,6 +3,34 @@
 All notable changes to err are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.603.0] - 2026-11-23
+
+### Changed
+
+- **`apple-fm` is gated on macOS 27+.** The on-device model does not exist on
+  older systems, so it is no longer shown as a row, never becomes the default,
+  and `err run apple-fm` refuses with a version message. On macOS 26 and older,
+  `err run` offers the installed MLX models; with none installed it opens the
+  download catalog instead of saying "no models installed".
+- **The question prompt asks for a real suggestion again.** The model decides
+  whether a command would help, and if it would, ends its answer with exactly
+  one fenced block containing only that command. err takes the *last* fenced
+  block, so an earlier example cannot shadow the suggestion. The prompt shows
+  the single-quote form (`echo 'Hello, world!'`) that survives zsh history
+  expansion.
+- **`err new` clears the terminal** before printing `arr // new session`, so a
+  fresh session starts at the top of a clean screen. Piped output is untouched.
+- **`err resume` rebuilds the conversation on screen.** After the pick it
+  prints the resumed session's title and the turns that fit the configured
+  history window, in the same `arr //` voice as a live answer. Piped output
+  stays silent, and `err resume <n>` keeps working as before.
+- **`err resume` titles are one line.** Line breaks from a multi-line question
+  or an older session file become a single space, so a title can no longer
+  split a resume row in half.
+- **Oldest supported macOS is 26 (Tahoe).** The current MLX wheels are built
+  for macOS 26 on Apple Silicon; the installer already refuses older systems,
+  non-Apple-Silicon hardware, and non-Darwin hosts.
+
 ## [0.602.0] - 2026-11-22
 
 ### Changed

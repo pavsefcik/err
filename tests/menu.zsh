@@ -69,6 +69,13 @@ engine_rows() { # $1 = tag (ignored), rest = args — rows come out of the picke
   zsh "$REPO/err-models.zsh" "${@:2}"
 }
 
+fm_available() {
+  local v major
+  v=$(sw_vers -productVersion 2>/dev/null) || return 1
+  major="${v%%.*}"
+  [[ "$major" == <-> ]] && (( major >= 27 )) && command -v fm >/dev/null 2>&1
+}
+
 print "menu: $FAKE_MODEL in a throwaway hub"
 
 # ── rows are commands ──────────────────────────────────────────────────
@@ -78,7 +85,11 @@ print "rendering"
 # aborts, which is what this sees.
 _out=$({ no_servers; engine_rows dump run } 2>&1)
 contains "err run $FAKE_MODEL" "$_out" "rows are the command you would type"
-contains "err run apple-fm" "$_out" "the Apple model is offered"
+if fm_available; then
+  contains "err run apple-fm" "$_out" "the Apple model is offered on macOS 27+"
+else
+  not_contains "apple-fm" "$_out" "the Apple model is hidden when macOS is older"
+fi
 not_contains "ARGS:" "$_out" "the picker does not shell out to a dialog tool"
 not_contains "* " "$_out" "rows carry no default marker (the cursor is 'arr //')"
 
@@ -87,6 +98,23 @@ if print -r -- "$_out" | grep -qx 'err run'; then
 else
   ok "no title row above the rows"
 fi
+
+print "macOS gate"
+# On macOS 26 or older the on-device model is not present: no row, and a run
+# with no installed model must offer a download instead.
+mkdir -p "$_TMP/macos26"
+cat > "$_TMP/macos26/sw_vers" <<'EOF'
+#!/bin/sh
+echo 26.0
+EOF
+chmod +x "$_TMP/macos26/sw_vers"
+_out=$({ PATH="$_TMP/macos26:$_TMP/bin:$PATH"; engine_rows dump run } 2>&1)
+contains "err run $FAKE_MODEL" "$_out" "installed models are still offered on macOS 26"
+not_contains "apple-fm" "$_out" "apple-fm is not offered on macOS 26"
+mkdir -p "$_TMP/empty-hub"
+_out=$({ PATH="$_TMP/macos26:$_TMP/bin:$PATH"; ERR_HUB_DIR="$_TMP/empty-hub" engine_rows dump run } 2>&1)
+contains "err download" "$_out" "err run offers a download when no model is present"
+not_contains "apple-fm" "$_out" "no Apple model row when none is present"
 
 # ── read-only verbs don't open pickers or start anything ───────────────
 print "read-only verbs"

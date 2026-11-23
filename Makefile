@@ -1,4 +1,4 @@
-# err v0.602.0 — dev tasks. The tool itself needs no build step.
+# err v0.603.0 — dev tasks. The tool itself needs no build step.
 
 VERSION := $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
 

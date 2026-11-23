@@ -11,7 +11,7 @@
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
    on `:11500`.
 
-Version lives in `VERSION` (`0.602.0`). `CONTRACT.md` is the authoritative
+Version lives in `VERSION` (`0.603.0`). `CONTRACT.md` is the authoritative
 description of the seams between the three layers — read it before touching
 dispatch, env vars, or session storage.
 

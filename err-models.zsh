@@ -446,6 +446,18 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "${p:-8080}"
   }
 
+  # The on-device model is only present on macOS 27+ (the `fm` CLI ships
+  # there). On macOS 26 or older it is not an option at all: no row, no start,
+  # no "backend is fm" default. The version check is the gate, and `fm` must
+  # also exist, so a partially upgraded machine cannot show a dead row.
+  _err_fm_supported() {
+    local ver major
+    ver=$(sw_vers -productVersion 2>/dev/null) || return 1
+    major="${ver%%.*}"
+    [[ "$major" == <-> ]] && (( major >= 27 )) || return 1
+    command -v fm >/dev/null 2>&1
+  }
+
   # pid of the fm server, but only if the listener really is `fm` (not some
   # unrelated service that happens to own the port).
   _err_fm_running() {
@@ -463,6 +475,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   }
 
   _err_fm_start() {
+    if ! _err_fm_supported; then
+      print -u2 "err: apple-fm needs macOS 27 or later (this is macOS $(sw_vers -productVersion 2>/dev/null || print unknown))"
+      return 1
+    fi
     local pid port; port=$(_err_fm_port)
     if pid=$(_err_fm_running); then
       _err_say "$_ERR_FM_ID already running"
@@ -534,10 +550,13 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # is also what err.py answers from. No separate default file.
     local m="" b=""
     m=$(_err_last_model)
+    # A stale last-model naming the on-device backend on an older macOS must
+    # not become the default: the model is not there any more (or never was).
+    [[ "$m" == "$_ERR_FM_ID" ]] && ! _err_fm_supported && m=""
     if [[ -z "$m" && -r "$(_err_conf_path)" ]]; then
       b=$(grep -E '^[[:space:]]*backend[[:space:]]*=' "$(_err_conf_path)" 2>/dev/null \
         | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d '[:space:]')
-      [[ "$b" == (fm|pcc) ]] && m="$_ERR_FM_ID"
+      [[ "$b" == (fm|pcc) ]] && _err_fm_supported && m="$_ERR_FM_ID"
     fi
     [[ -n "$m" ]] && print -r -- "$m"
   }
@@ -901,7 +920,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # The Apple model is a backend, not a repo: last, so the MLX repos a user
     # actually runs stay in front of it.
     local -a all=( "${ids[@]}" )
-    (( with_fm )) && [[ "$exclude" != "$_ERR_FM_ID" ]] && all=( "${ids[@]}" "$_ERR_FM_ID" )
+    (( with_fm )) && _err_fm_supported \
+      && [[ "$exclude" != "$_ERR_FM_ID" ]] && all=( "${ids[@]}" "$_ERR_FM_ID" )
     if (( ! ${#all[@]} )); then
       if [[ -n "$exclude" ]]; then
         print -u2 "err: no other model installed — get one with 'err download'"
@@ -952,7 +972,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     local header="$1" verb="${2:-run}" m
     for m in $(_err_default_model) $(_err_last_model); do
       [[ -z "$m" ]] && continue
-      [[ "$m" == "$_ERR_FM_ID" ]] && { print -r -- "$m"; return 0 }
+      if [[ "$m" == "$_ERR_FM_ID" ]]; then
+        _err_fm_supported && { print -r -- "$m"; return 0 }
+        continue
+      fi
       _err_model_supported "$m" "$hub_dir" && { print -r -- "$m"; return 0 }
     done
     _err_pick_installed "$header" "$verb"
@@ -971,7 +994,22 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         _err_note_last_model "$rcur"
         return 0
       fi
-      model=$(_err_pick_installed "err run" run) || return 1
+      # No installed MLX model and no Apple model on this macOS: the useful
+      # next step is a download, not "no models installed — try err download".
+      local -a ids=( ${(f)"$(_err_installed_ids)"} )
+      ids=( ${ids:#} )
+      if (( ! ${#ids[@]} )) && ! _err_fm_supported; then
+        local pick
+        pick=$(_err_pick_catalog "err run") || return 1
+        if [[ "$pick" == "__hf_id__" ]]; then
+          pick=$(_err_input 'Hugging Face ID (org/model): ') || return 1
+          [[ -z "$pick" ]] && return 1
+        fi
+        _err_headless_download "$pick" || return 1
+        model="$pick"
+      else
+        model=$(_err_pick_installed "err run" run) || return 1
+      fi
     fi
     # After the pick, not before: the Apple model is a backend, not a repo, and
     # a pick of it must never fall through to a Hugging Face download.
@@ -1321,7 +1359,12 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       row warn model "no model has been run yet" "err run <model>"
       (( warnings++ ))
     elif [[ "$def" == "$_ERR_FM_ID" ]]; then
-      row ok default "apple-fm (on-device)"
+      if _err_fm_supported; then
+        row ok default "apple-fm (on-device)"
+      else
+        row warn default "apple-fm is not available on this macOS" "err run <model>"
+        (( warnings++ ))
+      fi
     elif [[ -n "$(_err_conf_get mlx_model)${ERR_MLX_MODEL:-}" ]]; then
       row ok default "$def (remote server)"
     elif [[ -d "$hub_dir/models--${def//\//--}" ]]; then

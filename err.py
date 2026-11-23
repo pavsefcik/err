@@ -878,6 +878,16 @@ def conversation_messages(system_prompt: str, sid: str, user_content: str) -> li
     return messages
 
 
+def single_line(text: str) -> str:
+    """One line for menus, rows and titles: every line break becomes one space.
+
+    A session title can come from a multi-line question or an older session
+    file. `err resume` prints one row per session, so a raw newline there splits
+    a row in half and the next row parses as part of the title.
+    """
+    return re.sub(r"[\r\n]+", " ", text or "").strip()
+
+
 def _session_title(user_content: str, command: str) -> str:
     """One readable line for `err resume`.
 
@@ -900,7 +910,7 @@ def record_turn(sid: str, user_content: str, answer: str, cmd: str, exit_code: i
     if not sess.get("turns") and not sess.get("title"):
         # `title` is caller-supplied from the RAW command/question (see the
         # callers), so it must go through the same redaction as the turn.
-        sess["title"] = redact(title or _session_title(user_content, c))[:60]
+        sess["title"] = single_line(redact(title or _session_title(user_content, c)))[:60]
     sess["turns"].append({"q": q, "a": a, "cmd": c, "exit": exit_code, "tokens": tokens})
     sess["tokens"] = _safe_int(sess.get("tokens", 0)) + tokens
     sess["last_used"] = int(time.time())
@@ -913,15 +923,31 @@ def record_turn(sid: str, user_content: str, answer: str, cmd: str, exit_code: i
 FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 
 
-def first_fenced_line(text: str):
-    match = FENCED_BLOCK_RE.search(text or "")
-    if not match:
-        return None
-    for line in match.group(1).splitlines():
+def _first_line_of_block(block: str):
+    for line in block.splitlines():
         stripped = line.strip()
         if stripped:
             return stripped
     return None
+
+
+def first_fenced_line(text: str):
+    match = FENCED_BLOCK_RE.search(text or "")
+    if not match:
+        return None
+    return _first_line_of_block(match.group(1))
+
+
+def last_fenced_line(text: str):
+    """The suggestion is the *last* block: the prompt asks the model to end
+    its answer with it, so an earlier example cannot shadow the real command.
+    """
+    match = None
+    for match in FENCED_BLOCK_RE.finditer(text or ""):
+        pass
+    if match is None:
+        return None
+    return _first_line_of_block(match.group(1))
 
 
 def zsh_safe_command(command: str) -> str:
@@ -1010,7 +1036,7 @@ def write_suggest_file(text: str) -> None:
     path = os.environ.get("_ERR_SUGGEST_FILE")
     if not path:
         return
-    command = first_fenced_line(text)
+    command = last_fenced_line(text)
     if not command:
         return
     command = zsh_safe_command(command)
@@ -1398,7 +1424,7 @@ def run_ask(question: str) -> None:
     if answer is None:
         sys.exit(1)
     write_suggest_file(answer)
-    suggested = first_fenced_line(answer) or ""
+    suggested = last_fenced_line(answer) or ""
     record_turn(sid, user_content, answer, suggested, 0, tokens, title=question)
 
 
@@ -1429,6 +1455,11 @@ def cmd_new(quiet: bool = False) -> None:
     # The launcher sets _ERR_SESSION_ID_FILE; without it this is the internal
     # "mint an id and print it" mode, whose stdout must stay a bare id.
     if os.environ.get("_ERR_SESSION_ID_FILE") and not quiet:
+        # A fresh session starts at the top of a fresh screen. Only a real
+        # terminal is cleared: piped output (tests, scripts) stays parseable.
+        if sys.stdout.isatty():
+            sys.stdout.write("\033[H\033[2J\033[3J")
+            sys.stdout.flush()
         print(answer_prefix() + "new session")
 
 
@@ -1571,6 +1602,50 @@ def pick_row(rows: list) -> int:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def session_question(turn: dict) -> str:
+    """The human question in a stored turn, without the context block.
+
+    Ask turns may be `Context … / Command … / Question: …`; explain turns have
+    no question at all, so the command they explained is the readable stand-in.
+    """
+    q = (turn.get("q") or "").strip()
+    marker = "\nQuestion: "
+    if marker in q:
+        return q.split(marker, 1)[1].strip()
+    if q.startswith("Context — the command I just ran:"):
+        for line in q.splitlines():
+            if line.startswith("Command: "):
+                return "explain " + line[len("Command: "):].strip()
+    return q
+
+
+def replay_session(sess: dict) -> None:
+    """Put the resumed conversation back on screen.
+
+    Only the turns the next request will actually carry (the configured
+    history window) are shown; older turns stay in the session file but are
+    not part of what the model remembers, so showing them would lie.
+    """
+    turns = sess.get("turns") or []
+    if not turns:
+        return
+    limit = history_turn_limit()
+    shown = turns[-limit:] if limit else list(turns)
+    omitted = len(turns) - len(shown)
+    title = single_line(sess.get("title") or "") or "(untitled)"
+    print()
+    print(answer_prefix() + "resumed: " + title)
+    if omitted > 0:
+        print("       (%d earlier turn(s) not in the context window)" % omitted)
+    for turn in shown:
+        question = session_question(turn)
+        answer = (turn.get("a") or "").strip()
+        if question:
+            print("       > " + question)
+        if answer:
+            print(answer_prefix() + answer)
+
+
 def cmd_resume(args: list) -> None:
     sessions = load_all_sessions()
     sessions.sort(key=lambda s: _safe_int(s.get("last_used", 0)), reverse=True)
@@ -1583,9 +1658,9 @@ def cmd_resume(args: list) -> None:
         rows = []
         for index, sess in enumerate(sessions, 1):
             age = human_age(now - _safe_int(sess.get("last_used", 0)))
-            tty = sess.get("tty") or "?"
-            cwd = sess.get("cwd") or "?"
-            title = (sess.get("title") or "").strip() or "(untitled)"
+            tty = single_line(sess.get("tty") or "?") or "?"
+            cwd = single_line(sess.get("cwd") or "?") or "?"
+            title = single_line(sess.get("title") or "") or "(untitled)"
             # The row stays a command: `err resume 3` is what you would type,
             # the rest is the label that makes the number meaningful.
             rows.append(f"err resume {index}  {age:>4}  {tty}  {cwd}  {title}")
@@ -1614,6 +1689,10 @@ def cmd_resume(args: list) -> None:
     sess["last_used"] = int(time.time())
     save_session(sess)
     publish_session_state(sess)
+    # Rebuild the conversation on screen for a human; a pipe (script, test,
+    # `err resume 1 | …`) keeps its old, silent behavior.
+    if sys.stdout.isatty():
+        replay_session(sess)
     emit_session_id(sid)
 
 
