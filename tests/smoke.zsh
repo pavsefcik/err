@@ -81,6 +81,7 @@ _out=$(cmd_out 'err')
 contains "err new"           "$_out" "bare err shows the menu rows"
 contains "err run <model>"   "$_out" "the menu lists err run"
 contains "err cleanup"       "$_out" "the menu lists err cleanup"
+contains "err update"        "$_out" "the menu lists err update"
 contains "err record"        "$_out" "the menu lists err record"
 not_contains "err settings"  "$_out" "err settings is gone (one config file)"
 not_contains "err status"    "$_out" "err status folded into info"

@@ -41,7 +41,7 @@ over free text** — `err run` is the model verb, never the question "run".
 | `err wtf` | `err.py` (explain last command) |
 | `err <anything else>` | `err.py --ask "<text>"` |
 | `err new` · `resume [n]` | `err.py` (session verbs) |
-| `err run` `swap` `stop` `list` `info` `download` `remove` `config` `cleanup` `uninstall` `doctor` `version` (`ls`/`rm` aliases) | `err-models.zsh` (same verb, same args) |
+| `err run` `swap` `stop` `list` `info` `download` `remove` `config` `cleanup` `update` `uninstall` `doctor` `version` (`ls`/`rm` aliases) | `err-models.zsh` (same verb, same args) |
 | `ensure <model>` | `err-models.zsh`, **hidden** — called by err.py, never by a user |
 | `err version` `-v` `--version` | launcher prints `VERSION` |
 
@@ -145,24 +145,39 @@ feeds `RPROMPT`.
 
 Every server err starts is detached, so it also has to be able to die on its
 own. Each start path arms one idle watchdog: `err.py:ensure_running` (fm) and
-the engine's `_err_arm_watchdog` (the MLX server on `:11500`
-port), both via `python3 err.py --watchdog <pid> [port]`. `--watchdog-run` is
-the detached loop; `err.conf` → `idle_timeout_minutes` (default 10) is the
-timeout. A server is **idle** only when all three are true:
+the engine's `_err_headless_launch` via `_err_arm_watchdog` (the MLX server on
+`:11500`), both through `python3 err.py --watchdog <pid> [--port N]
+[--idle MIN]`. `--watchdog-run` is the detached loop. A server is **idle** when
+all of these are true:
 
 1. nobody stamped its heartbeat — `$ERR_STATE_DIR/fm_heartbeat` for fm,
    `$ERR_STATE_DIR/mlx_heartbeat-<port>` for MLX (per port on purpose: a client
-   on `:11501` must not keep `:11500` awake). `err.py` stamps on every mlx request;
-2. no client holds an established connection to the port;
-3. it burned less than 0.25 s of CPU since the previous 20 s poll.
+   on `:11501` must not keep `:11500` awake). The engine creates the file at
+   launch and `err.py` restamps it on every request it makes;
+2. it has not appeared as a new connection within `idle_socket_grace_seconds`
+   (default 60). A connection is evidence of a request; a socket that has been
+   open since yesterday is not, and counting it would let one pooled keep-alive
+   client pin a model forever;
+3. it burned less than 0.25 s of CPU since the previous 20 s poll — the safety
+   net for clients err knows nothing about (curl, pi, an OpenAI SDK), because
+   a server generating tokens always burns CPU.
 
-(3) is the safety net that makes this work for clients err knows nothing
-about — curl, the pi extension, another app — because a server generating
-tokens always burns CPU. The watchdog SIGTERMs once the timeout expires and
-exits as soon as the pid is gone. `ERR_WATCHDOG_POLL` lowers the poll interval
-for tests; it is not a user-facing setting. `err info` deliberately does not
-stamp a heartbeat (it is polled by clients), so a read-only query can never
-keep a model alive.
+The timeout is `idle_timeout_minutes` (default 10), overridden per launch by
+`err run|swap --idle <minutes|Nm|Nh>` and disabled by `--keep` (`--idle 0`).
+Under macOS memory pressure (`kern.memorystatus_vm_pressure_level` >= 2) the
+limit drops to `idle_timeout_pressure_minutes` (default 1): the weights are the
+first thing worth giving back. The watchdog SIGTERMs the **listener** pid, logs
+one line to `$ERR_STATE_DIR/logs/watchdog.log` (`stopped <model> :<port> after
+10m idle`), deletes the heartbeat and exits as soon as the pid is gone. It also
+exits without killing if the pid's start time changed (pid reused).
+
+A server err did not start is never adopted: `_err_adopt_watchdog` (called from
+`ensure` and `err doctor`) only arms one for a port with an
+`mlx_heartbeat-<port>` file, i.e. a server err started whose watchdog is
+missing. `ERR_WATCHDOG_POLL`, `ERR_SOCKET_GRACE`, `ERR_IDLE_PRESSURE_MIN` and
+`ERR_MEMORY_PRESSURE` lower/force the knobs for the tests; they are not
+user-facing settings. `err info` deliberately does not stamp a heartbeat (it is
+polled by clients), so a read-only query can never keep a model alive.
 
 ## The on-device model is a selectable row
 
@@ -188,6 +203,9 @@ Existing keys stay. Added:
 backend        = fm | mlx | pcc     (managed by `err default`/`err switch`;
                                     mlx = the :11500 server)
 mlx_base_url   = http://127.0.0.1:11500
+idle_timeout_minutes = 10           (0 = never stop; --idle/--keep override)
+idle_timeout_pressure_minutes = 1   (idle limit under macOS memory pressure)
+idle_socket_grace_seconds = 60      (how long a new connection counts as use)
 mlx_autostart  = on                 (start the saved model when :11500 is down;
                                     off = print "err run <model>" instead)
 idle_timeout_minutes = 10           (shut a server err started down when idle)

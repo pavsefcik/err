@@ -3,6 +3,50 @@
 All notable changes to err are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **`err update`** — update err itself from inside the shell, listed right after
+  `err cleanup` in the menu. A git checkout is fast-forwarded with
+  `git pull --ff-only` (local work is never merged or clobbered); a managed
+  curl install refreshes its own `~/.err` snapshot in place through the same
+  installer the one-liner runs. Either way the installer then re-checks tools,
+  the PTY hook and the `~/.zshrc` wiring, so an update lands exactly where a
+  fresh install would. State, config and model weights are never touched, and a
+  changed version says the running shell still holds the old launcher — open a
+  new terminal or run `reload`.
+- **`err run --idle <minutes>` and `--keep`** — per-launch control over how long
+  a model may sit unused. `--idle 45m` overrides `idle_timeout_minutes` for that
+  launch, `--keep` (or `--idle 0`) arms no watchdog at all. `err swap` takes the
+  same flags.
+- **Memory-pressure reaping.** While macOS reports memory pressure the idle
+  limit drops to `idle_timeout_pressure_minutes` (default 1): the weights are
+  the first thing worth giving back. New `err.conf` keys:
+  `idle_timeout_pressure_minutes` and `idle_socket_grace_seconds`.
+- **A reap leaves a breadcrumb.** The watchdog appends one line to
+  `$ERR_STATE_DIR/logs/watchdog.log` (`stopped <model> :11500 after 10m idle`),
+  so a model that disappears is no longer indistinguishable from a crash.
+  `err doctor` shows the watchdog state of a running server and re-arms an
+  err-owned server that lost it.
+
+### Fixed
+
+- **The MLX idle watchdog was never armed.** `_err_arm_watchdog` existed, was
+  documented as the thing that stops `:11500` models, and had no call site — an
+  `err run` model stayed in RAM until `err stop` or a reboot (one had been
+  serving for 25 hours). `_err_headless_launch` now arms it on every path
+  (`run`, `swap`, `ensure`), so `idle_timeout_minutes` means what it says.
+  `err doctor` / `ensure` adopt err-owned servers started before the fix.
+- **A keep-alive connection no longer pins a model forever.** Established
+  sockets counted as activity for as long as they existed, so one pooled client
+  could keep a server alive all night. A connection now counts only for
+  `idle_socket_grace_seconds` after it appears; CPU burn and err's own requests
+  remain the real signals.
+- **The watchdog no longer risks killing a recycled pid.** It records the
+  server's start time when armed and exits without signalling if the pid now
+  belongs to a different process.
+
 ## [0.603.0] - 2026-11-23
 
 ### Changed

@@ -79,11 +79,34 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _cfg_float(key: str, default: float) -> float:
+    """A float from the one config file, or `default` when absent/garbage."""
+    try:
+        return float(str(CFG.get(key, "")).strip() or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 # How often the idle watchdog wakes up, and how much CPU a server must have
 # burned between two polls to count as "busy". ERR_WATCHDOG_POLL exists for the
 # tests, which cannot wait 20 seconds per tick.
 WATCHDOG_POLL = max(0.05, _env_float("ERR_WATCHDOG_POLL", 20))
 WATCHDOG_CPU_DELTA = 0.25
+
+# A connection counts as activity for this long after it APPEARS, and no
+# longer. A pooled keep-alive socket an app has held open for an hour is not
+# use, and without this bound one such client pins a model forever — the
+# server's own CPU (generation) and err's heartbeat are the real signals.
+# 0 = connections never count on their own.
+SOCKET_GRACE = max(0.0, _env_float(
+    "ERR_SOCKET_GRACE", _cfg_float("idle_socket_grace_seconds", 60.0)))
+
+# Under macOS memory pressure an idle server is dropped this much sooner: the
+# weights are the first thing worth giving back, and a cold start beats a swap
+# storm. 0 disables the override.
+PRESSURE_TIMEOUT_MIN = max(0.0, _env_float(
+    "ERR_IDLE_PRESSURE_MIN",
+    _cfg_float("idle_timeout_pressure_minutes", 1.0)))
 
 
 def heartbeat_file(port=None) -> str:
@@ -285,6 +308,61 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _proc_start(pid: int):
+    """`ps -o lstart=` for `pid`, or None.
+
+    The watchdog is armed with a bare pid. Between launch and reap that pid can
+    be recycled, and SIGTERM would then hit an unrelated process; macOS has no
+    /proc, so the process start time is the cheap identity check.
+    """
+    try:
+        out = subprocess.check_output(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+        ).decode("ascii", "replace").strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out or None
+
+
+def _server_label(pid: int) -> str:
+    """Best-effort model id of `pid`: err renames the server to its model."""
+    try:
+        cmd = subprocess.check_output(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", "replace").strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    if not cmd:
+        return ""
+    if "--model " in cmd:
+        return cmd.split("--model ", 1)[1].split(" ", 1)[0]
+    return cmd.split(" ", 1)[0]
+
+
+def memory_pressure() -> bool:
+    """True while macOS reports memory pressure (warning or critical).
+
+    `kern.memorystatus_vm_pressure_level` is 1 normal, 2 warning, 4 critical.
+    ERR_MEMORY_PRESSURE forces the answer for tests; an unreadable level means
+    "no pressure", because reaping on doubt is worse than sparing a model.
+    """
+    forced = os.environ.get("ERR_MEMORY_PRESSURE", "").strip().lower()
+    if forced in ("1", "true", "yes", "on"):
+        return True
+    if forced in ("0", "false", "no", "off"):
+        return False
+    try:
+        out = subprocess.check_output(
+            ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            stderr=subprocess.DEVNULL,
+        ).decode("ascii", "replace").strip()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return _safe_int(out, 1) >= 2
+
+
 def _cpu_seconds(pid: int):
     """Cumulative CPU time of `pid` in seconds, or None.
 
@@ -339,26 +417,64 @@ def _cpu_delta_threshold() -> float:
     return max(0.01, min(WATCHDOG_CPU_DELTA, WATCHDOG_POLL * 0.25))
 
 
-def watchdog_loop(pid: int, port=None) -> None:
-    """SIGTERM `pid` after IDLE_TIMEOUT_MIN minutes without activity.
+def watchdog_log(message: str) -> None:
+    """Append one breadcrumb to state/logs/watchdog.log.
 
-    A server is idle when no client stamped its heartbeat, no connection is
-    established on its port, and it burned no CPU since the last poll. CPU is
-    what catches clients that stamp nothing (curl, pi, another app): a server
-    generating tokens always burns some.
+    A model that vanishes silently is indistinguishable from a crash, and the
+    user's only evidence would be a port that stopped answering.
+    """
+    try:
+        path = os.path.join(_state_root(), "logs")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "watchdog.log"), "a") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), message))
+    except OSError:
+        pass
+
+
+def watchdog_loop(pid: int, port=None, idle_minutes=None) -> None:
+    """SIGTERM `pid` after the server has been idle for `idle_minutes`.
+
+    Activity, in the order it maps to real use:
+
+    * the heartbeat err's own requests stamp (`mlx_heartbeat-<port>`),
+    * CPU burned since the last poll — generation by ANY client, including an
+      app that stamps nothing and keeps no socket open (an OpenAI SDK),
+    * a connection that has just appeared, for `idle_socket_grace_seconds`.
+      Not "any open socket": a pooled keep-alive connection would otherwise
+      pin a model forever.
+
+    `idle_minutes` is the launch override (`err run --idle 45m`); None means
+    `idle_timeout_minutes` from err.conf. Under memory pressure the limit drops
+    to `idle_timeout_pressure_minutes`.
     """
     hb = heartbeat_file(port)
-    timeout = max(0.02, IDLE_TIMEOUT_MIN) * 60.0
+    if idle_minutes is None:
+        idle_minutes = IDLE_TIMEOUT_MIN
+    if float(idle_minutes) <= 0:
+        return                  # 0 = never stop (also what `--keep` means)
+    timeout = max(0.02, float(idle_minutes) * 60.0)
     cpu_delta = _cpu_delta_threshold()
     cpu_prev = _cpu_seconds(pid)
+    ident = _proc_start(pid)
     last = time.time()          # grace: never reap right after arming
+    grace_until = last
+    busy_prev = False
     while True:
         time.sleep(WATCHDOG_POLL)
         if not _pid_alive(pid):
             return
         now = time.time()
+        if ident is not None:
+            fresh = _proc_start(pid)
+            if fresh is not None and fresh != ident:
+                # The original died and the pid was recycled: never SIGTERM a
+                # stranger.
+                return
         try:
-            last = max(last, os.path.getmtime(hb))
+            # Clamped to `now`: a heartbeat with a future mtime (clock skew,
+            # a restored file) must not pin the server awake forever.
+            last = max(last, min(os.path.getmtime(hb), now))
         except OSError:
             pass
         if port is not None:
@@ -367,17 +483,45 @@ def watchdog_loop(pid: int, port=None) -> None:
                     and cpu - cpu_prev >= cpu_delta:
                 last = now
             cpu_prev = cpu
-            if _port_busy(port):
+            busy = _port_busy(port)
+            if busy and not busy_prev:
+                grace_until = now + SOCKET_GRACE     # a client just showed up
+            busy_prev = busy
+            if busy and now <= grace_until:
                 last = now
-        if now - last >= timeout:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
+        limit = timeout
+        pressure = memory_pressure()
+        if pressure and PRESSURE_TIMEOUT_MIN > 0:
+            limit = min(limit, PRESSURE_TIMEOUT_MIN * 60.0)
+        if now - last >= limit:
+            _reap(pid, port, hb, now - last, pressure)
             return
 
 
-def spawn_idle_watchdog(server_pid: int, port=None) -> None:
+def _reap(pid: int, port, hb: str, idle_seconds: float, pressure: bool) -> None:
+    """Stop an idle server and leave a breadcrumb saying why."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    label = _server_label(pid) or ("pid %d" % pid)
+    where = (":%s" % port) if port is not None else ""
+    if idle_seconds >= 60:
+        why = "idle %.0fm" % (idle_seconds / 60.0)
+    else:
+        why = "idle %.0fs" % idle_seconds
+    if pressure:
+        why += ", memory pressure"
+    watchdog_log("stopped %s on %s after %s" % (label, where or "the server", why))
+    # Drop the heartbeat: a file left behind would let a later err adopt (and
+    # reap) a server on this port that it did not start.
+    try:
+        os.unlink(hb)
+    except OSError:
+        pass
+
+
+def spawn_idle_watchdog(server_pid: int, port=None, idle_minutes=None) -> None:
     """Arm a detached idle watchdog for a server err started.
 
     Both start paths call this: err.py's own `ensure_running` (fm) and the
@@ -386,7 +530,9 @@ def spawn_idle_watchdog(server_pid: int, port=None) -> None:
     cmd = [sys.executable, os.path.abspath(__file__), "--watchdog-run",
            str(server_pid)]
     if port is not None:
-        cmd.append(str(port))
+        cmd += ["--port", str(port)]
+    if idle_minutes is not None:
+        cmd += ["--idle", str(idle_minutes)]
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -1861,25 +2007,39 @@ def main() -> None:
         cmd_record()
         return
 
-    # Internal: arm / run the idle watchdog. `--watchdog <pid> [port]` arms a
-    # detached one; `--watchdog-run` is that detached process itself. Called by
-    # err.py itself (fm) and by the engine's `_err_headless_launch` (MLX),
-    # so a model err started never outlives its usefulness.
+    # Internal: arm / run the idle watchdog. `--watchdog <pid> [--port N]
+    # [--idle MIN]` arms a detached one; `--watchdog-run` is that detached
+    # process itself. Called by err.py itself (fm) and by the engine's
+    # `_err_headless_launch` (MLX), so a model err started never outlives its
+    # usefulness. Bare positionals are still accepted (pid, then port).
     if args and args[0] in ("--watchdog", "--watchdog-run"):
-        try:
-            pid = int(args[1])
-        except (IndexError, ValueError):
-            return
+        pid = None
         port = None
-        if len(args) > 2:
-            try:
-                port = int(args[2])
-            except ValueError:
-                port = None
+        idle = None
+        rest = list(args[1:])
+        while rest:
+            item = rest.pop(0)
+            if item == "--port":
+                port = _safe_int(rest.pop(0) if rest else "", None)
+            elif item == "--idle":
+                try:
+                    idle = float(rest.pop(0)) if rest else None
+                except ValueError:
+                    idle = None
+            else:
+                value = _safe_int(item, None)
+                if value is None:
+                    continue
+                if pid is None:
+                    pid = value
+                elif port is None:
+                    port = value
+        if pid is None:
+            return
         if args[0] == "--watchdog-run":
-            watchdog_loop(pid, port)
+            watchdog_loop(pid, port, idle)
         else:
-            spawn_idle_watchdog(pid, port)
+            spawn_idle_watchdog(pid, port, idle)
         return
 
     if args and args[0] == "--prompt":

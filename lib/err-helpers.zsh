@@ -159,7 +159,8 @@ _err_usage() {
   print "  err 'question'   err wtf      err new       err resume"
   print "  err run|swap <model>           err info      err stop"
   print "  err list         err download|remove <model>"
-  print "  err config       err cleanup   err doctor   err uninstall"
+  print "  err config       err cleanup   err update   err doctor"
+  print "  err uninstall"
 }
 
 # Upstream of the bundled curated catalog. `main` is the live list, so an

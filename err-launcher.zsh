@@ -183,7 +183,7 @@ _err_help_interactive() {
 _err_engine_verbs=(
   # model manager (every `case` arm in err-models.zsh that a user can type)
   swap switch run serve stop doctor
-  list ls download remove rm config reset info cleanup
+  list ls download remove rm config reset info cleanup update
   uninstall ensure
 )
 

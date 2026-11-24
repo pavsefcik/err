@@ -7,7 +7,7 @@
    open the interactive menu. Runs on the on-device Apple Foundation Model
    (`fm`), no API key.
 2. **model manager** — `err run|swap|stop|list|info|download|remove|config|
-   cleanup|uninstall|doctor` (plus hidden `version`/`ls`/`rm`), carried over
+   cleanup|update|uninstall|doctor` (plus hidden `version`/`ls`/`rm`), carried over
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
    on `:11500`.
 
@@ -76,6 +76,12 @@ so `port = 8080  # x` breaks it). Python and zsh read the same file. Repeatable
 
 ## Gotchas that already bit us (do not re-learn them)
 
+- **A test that runs a copied install tree rewrites the real `~/.zshrc`.**
+  Every engine start calls `_err_migrate_zshrc`, which repoints the launcher line
+  at that copy's `$_ERR_SRC_DIR` — it did exactly that from a `mktemp -d` copy,
+  leaving the developer's shell sourcing a temp path. Any test that invokes a
+  copied `err-models.zsh` must set `HOME` to a throwaway directory (see the
+  `err update` block in `tests/menu.zsh`).
 - **`noglob` breaks naive preexec guards.** `alias err='noglob err'` means the
   hook sees `noglob err …`. `_err_is_ours()` strips the prefix; anything that
   matches command lines must go through it, or `err` records itself as your
@@ -92,13 +98,18 @@ so `port = 8080  # x` breaks it). Python and zsh read the same file. Repeatable
 - **One model at a time.** A second model replaces the first. Ports stay a
   contract — `run`/`swap` own `:11500`.
 - **Every server err starts gets shut down again.** `err.py:ensure_running`
-  (fm) and the engine's `_err_arm_watchdog` (the MLX model on :11500) arm the
-  idle watchdog via `python3 err.py --watchdog <pid> [port]`, and
-  `err.py --watchdog-run` is that detached loop. Heartbeats are per server:
-  `$ERR_STATE_DIR/fm_heartbeat` for fm, `mlx_heartbeat-<port>` for MLX. Never
-  arm a watchdog
-  from a read-only query (`err info` is polled by clients — it would keep
-  every model awake forever).
+  (fm) and `_err_headless_launch` → `_err_arm_watchdog` (the MLX model on
+  :11500) arm the idle watchdog via `python3 err.py --watchdog <pid> [--port N]
+  [--idle MIN]`, and `err.py --watchdog-run` is that detached loop. Heartbeats
+  are per server: `$ERR_STATE_DIR/fm_heartbeat` for fm, `mlx_heartbeat-<port>`
+  for MLX (created by the engine at launch, not just stamped by err.py). Never
+  arm a watchdog from a read-only query (`err info` is polled by clients — it
+  would keep every model awake forever). **This call site was missing for the
+  whole MLX path** (the function existed, nothing called it), so `err run`
+  models ran for days; `_err_adopt_watchdog` heals servers started before the
+  fix. Activity is heartbeat + CPU burn + a connection's first
+  `idle_socket_grace_seconds` — a pooled keep-alive socket must never count,
+  or one client pins a model forever.
 - **Two system prompts, and they are opposite on purpose.** The question prompt
   asks for a fenced example (that block is what feeds `_ERR_SUGGEST_FILE`); the
   explain prompt forbids one (`err wtf` must never put a command in history).

@@ -20,6 +20,11 @@ _err_engine_main() {
   local config_file="$state_dir/err.conf"
 
   typeset -ga ERR_SERVER_FLAGS=()
+  # `err run` / `err swap` flags, filled by _err_run_flags so both verbs parse
+  # them identically: the remaining words (the model) and the idle override.
+  typeset -ga _ERR_RUN_ARGS=()
+  typeset -g _ERR_RUN_IDLE=""
+  typeset -g _ERR_RUN_HELP=0
 
   # Version query: handled before the tool check so it works even on a
   # half-broken install — reporting the version shouldn't depend on uvx.
@@ -261,6 +266,45 @@ fi
 # Disable it so huggingface_hub stores those blobs as regular files under the model dir.
 export HF_HUB_DISABLE_SHARED_BLOBS=1
 
+  # `err run` / `err swap` flags: `--idle <spec>` and `--keep`. Leaves the
+  # non-flag words in _ERR_RUN_ARGS and the normalized idle override (minutes,
+  # empty for the err.conf default, or "keep") in _ERR_RUN_IDLE. Shared by both
+  # verbs so `err swap x --keep` cannot drift from `err run x --keep`.
+  _err_run_flags() {
+    _ERR_RUN_IDLE=""
+    _ERR_RUN_ARGS=()
+    _ERR_RUN_HELP=0
+    while (( $# )); do
+      case "$1" in
+        -h|--help) _ERR_RUN_HELP=1; shift ;;
+        --keep|--no-idle) _ERR_RUN_IDLE="keep"; shift ;;
+        --idle) _ERR_RUN_IDLE="${2:-keep}"; shift; (( $# )) && shift ;;
+        --idle=*) _ERR_RUN_IDLE="${1#--idle=}"; shift ;;
+        --) shift; _ERR_RUN_ARGS+=( "$@" ); break ;;
+        *) _ERR_RUN_ARGS+=( "$1" ); shift ;;
+      esac
+    done
+    _ERR_RUN_IDLE=$(_err_idle_minutes "$_ERR_RUN_IDLE") || { _ERR_RUN_IDLE=""; return 2 }
+    return 0
+  }
+
+  # 30 | 30m | 1h | 0 | never | keep -> minutes as a string, "keep" for never.
+  _err_idle_minutes() {
+    local s="${1:-}" n num
+    [[ -z "$s" ]] && { print -r -- ""; return 0; }
+    case "${s:l}" in
+      never|off|keep|forever) print -r -- keep; return 0 ;;
+    esac
+    num="${s%[hHmM]}"
+    case "$s" in
+      *[hH]) [[ "$num" == <-> ]] || return 1; n=$(( num * 60 )) ;;
+      *[mM]) [[ "$num" == <-> ]] || return 1; n="$num" ;;
+      *)     [[ "$s" == <-> ]] || return 1; n="$s" ;;
+    esac
+    (( n == 0 )) && { print -r -- keep; return 0; }
+    print -r -- "$n"
+  }
+
   # Every server err starts is detached (`&!` / nohup) and would otherwise
   # outlive the command that started it and hold its weights in RAM forever.
   # Arm err.py's idle watchdog for it: inactivity is measured from the port's
@@ -269,16 +313,50 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   #
   # The watchdog gets the pid that LISTENS on the port, not `$!`: `$!` is the
   # uv/mlx-vlm shim, and SIGTERM to the shim leaves the real server (and its
-  # RAM) behind. Do not arm this from a read-only query path — `err info`
-  # is polled by clients and would keep every model awake.
+  # RAM) behind. Never arm this from a read-only query path that clients poll
+  # (`err info`): it would keep waking a model.
   _err_arm_watchdog() {
-    local port="$1" launched="$2" pid
+    local port="$1" launched="$2" idle="${3:-}" pid
     [[ -n "$port" ]] || return 0
+    # "" = the err.conf default. `idle_timeout_minutes = 0` means never: arm
+    # nothing, which is also what `--keep` asks for.
+    if [[ -z "$idle" ]]; then
+      idle=$(_err_conf_get idle_timeout_minutes)
+      idle=${idle:-10}
+    fi
+    case "$idle" in keep|0|0.0) return 0 ;; esac
+    [[ "$idle" == <-> ]] || idle=""      # garbage: let err.py's default apply
     : > "$state_dir/mlx_heartbeat-$port" 2>/dev/null
     pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1)
     [[ -n "$pid" ]] || pid="$launched"
     [[ -n "$pid" ]] || return 0
-    python3 "$_ERR_SRC_DIR/err.py" --watchdog "$pid" "$port" >/dev/null 2>&1 &!
+    # An array, not ${idle:+--idle "$idle"}: that expansion yields the single
+    # word `--idle 30`, which err.py's argument parser would drop.
+    local -a cmd=( python3 "$_ERR_SRC_DIR/err.py" --watchdog "$pid" --port "$port" )
+    [[ -n "$idle" ]] && cmd+=( --idle "$idle" )
+    "${cmd[@]}" >/dev/null 2>&1 &!
+    return 0
+  }
+
+  # pgrep, not `ps | grep`: grep's own command line contains the pattern, and
+  # pgrep never reports itself. The pid must be the whole argument, or
+  # 11591 would also match a watchdog for 115910.
+  _err_has_watchdog() {   # listener pid
+    pgrep -f "watchdog-run ${1}([[:space:]]|\$)" >/dev/null 2>&1
+  }
+
+  # Adopt an err-owned server that has no watchdog: it was started before err
+  # armed one, or its watchdog died with the shell. Ownership is the heartbeat
+  # file — `mlx_heartbeat-<port>` is only ever created for a server err started
+  # (and the reaper deletes it). A server someone else runs on :11500 has no
+  # such file and is left alone.
+  _err_adopt_watchdog() {
+    local port="${1:-11500}" pid
+    [[ -e "$state_dir/mlx_heartbeat-$port" ]] || return 1
+    pid=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+    [[ -n "$pid" ]] || return 1
+    _err_has_watchdog "$pid" && return 0
+    _err_arm_watchdog "$port" "$pid"
     return 0
   }
 
@@ -322,6 +400,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     while IFS=$'\t' read -r pid port model; do
       if [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; then
         echo "Stopped: $model (:$port)"
+        rm -f "$state_dir/mlx_heartbeat-$port" 2>/dev/null
       fi
     done < <(_err_running)
     _ERR_SESSION_PIDS=()
@@ -365,8 +444,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     return 0
   }
 
+  # $1 model, $2 port, $3 idle override: minutes as a string, "" for the
+  # err.conf default, or "keep" to arm no watchdog at all (`err run --keep`).
   _err_headless_launch() {
-    local model="$1" want_port="${2:-11500}"
+    local model="$1" want_port="${2:-11500}" idle="${3:-}"
     local unsupported
     if unsupported=$(_err_model_unsupported_reason "$model" "$hub_dir"); then
       _err_status_clear
@@ -417,6 +498,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       if _err_server_ready "$port"; then
         (( spin )) && printf '\r\033[K' >&2
         _err_say "running: $model on $url"
+        # One place arms the idle watchdog for an MLX server, whatever started
+        # it (`run`, `swap`, `ensure`): a detached server with no reaper holds
+        # its weights until `err stop` or a reboot.
+        [[ "$idle" == keep ]] || _err_arm_watchdog "$port" "$pid" "$idle"
         return 0
       fi
       sleep 0.2
@@ -475,6 +560,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   }
 
   _err_fm_start() {
+    local idle="${1:-}"
     if ! _err_fm_supported; then
       print -u2 "err: apple-fm needs macOS 27 or later (this is macOS $(sw_vers -productVersion 2>/dev/null || print unknown))"
       return 1
@@ -511,7 +597,11 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         # One place arms the idle watchdog (err.py owns the logic); without it
         # an engine-started fm server never shuts down. The pid must be the one
         # we just started: `pid` is still unset on this path.
-        python3 "$_ERR_SRC_DIR/err.py" --watchdog "${fmpid:-$pid}" >/dev/null 2>&1 &!
+        if [[ "$idle" != keep ]]; then
+          local -a cmd=( python3 "$_ERR_SRC_DIR/err.py" --watchdog "${fmpid:-$pid}" )
+          [[ -n "$idle" ]] && cmd+=( --idle "$idle" )
+          "${cmd[@]}" >/dev/null 2>&1 &!
+        fi
         _err_note_last_model "$_ERR_FM_ID"
         return 0
       fi
@@ -998,7 +1088,15 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   }
 
   _err_headless_run() {
-    local model="${1:-}"
+    _err_run_flags "$@" || {
+      print -u2 "usage: err run [--idle <minutes>|--keep] [model]"
+      return 2
+    }
+    if (( _ERR_RUN_HELP )); then
+      print "usage: err run [--idle <minutes>|--keep] [model]"
+      return 0
+    fi
+    local model="${_ERR_RUN_ARGS[1]:-}" idle="$_ERR_RUN_IDLE"
     if [[ -z "$model" ]]; then
       # `err run` with nothing to run is a status question when a model is
       # already serving: say so instead of opening a picker that would only
@@ -1030,7 +1128,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # After the pick, not before: the Apple model is a backend, not a repo, and
     # a pick of it must never fall through to a Hugging Face download.
     if [[ "$model" == "$_ERR_FM_ID" ]]; then
-      _err_fm_start
+      _err_fm_start "$idle"
       return $?
     fi
     # Fetch uncached weights before choosing a backend: the streaming-MoE
@@ -1050,6 +1148,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       read -r pid port cur <<< "$(_err_running_model)"
       if [[ "$cur" == "$model" ]]; then
         _err_say "$model already running"
+        _err_adopt_watchdog "$port"
         _err_note_last_model "$model"
         return 0
       fi
@@ -1061,7 +1160,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         sleep 0.2
       done
     fi
-    _err_headless_launch "$model"
+    _err_headless_launch "$model" 11500 "$idle"
     local rc=$?
     (( rc == 0 )) && _err_note_last_model "$model"
     return $rc
@@ -1082,7 +1181,11 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       _err_fm_stop >/dev/null 2>&1
       local n=0 pid port model
       while IFS=$'\t' read -r pid port model; do
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && { _err_say "stopped $model (:$port)"; (( n++ )); }
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null && {
+          _err_say "stopped $model (:$port)"
+          rm -f "$state_dir/mlx_heartbeat-$port" 2>/dev/null
+          (( n++ ))
+        }
       done < <(_err_running)
       (( n == 0 )) && _err_say "nothing is running"
       _err_apc_sweep "$state_dir/apc"
@@ -1092,7 +1195,11 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       local n=0 pid port model
       while IFS=$'\t' read -r pid port model; do
         if [[ "$model" == "$want" ]]; then
-          kill "$pid" 2>/dev/null && { print "err: stopped $model (:$port)"; (( n++ )); }
+          kill "$pid" 2>/dev/null && {
+            print "err: stopped $model (:$port)"
+            rm -f "$state_dir/mlx_heartbeat-$port" 2>/dev/null
+            (( n++ ))
+          }
         fi
       done < <(_err_running)
       if (( n == 0 )); then
@@ -1106,6 +1213,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       local pid port cur
       read -r pid port cur <<< "$(_err_running_model)"
       kill "$pid" 2>/dev/null && print "err: stopped $cur (pid $pid)"
+      rm -f "$state_dir/mlx_heartbeat-$port" 2>/dev/null
       _err_apc_sweep "$state_dir/apc"
       return 0
     fi
@@ -1117,19 +1225,29 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
   # err switch [model] — stop whatever serves :11500 and start another. The
   # model that starts is recorded in last-model, which makes it the default.
   _err_headless_switch() {
+    _err_run_flags "$@" || {
+      print -u2 "usage: err swap [--idle <minutes>|--keep] [model]"
+      return 2
+    }
     # There is nothing to swap *from* when nothing is running: starting the
     # first model is `err run`.
     if [[ -z "$(_err_running_model)" ]]; then
       _err_say "nothing is running — start one with 'err run <model>'"
       return 1
     fi
-    local model="${1:-}" cur="" pid port
+    if (( _ERR_RUN_HELP )); then
+      print "usage: err swap [--idle <minutes>|--keep] [model]"
+      return 0
+    fi
+    local model="${_ERR_RUN_ARGS[1]:-}" cur="" pid port
     read -r pid port cur <<< "$(_err_running_model)"
     if [[ -z "$model" ]]; then
       # The model that is already serving is not a swap target.
       model=$(_err_pick_installed "err swap" swap 1 "$cur") || return 1
     fi
-    _err_headless_run "$model" || return $?
+    local -a fwd=()
+    [[ -n "$_ERR_RUN_IDLE" ]] && fwd=( --idle "$_ERR_RUN_IDLE" )
+    _err_headless_run "${fwd[@]}" "$model" || return $?
     _err_point_backend_at "$model"
   }
 
@@ -1218,6 +1336,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       # relaunch it — that would restart a several-minute load. _err_wait_health
       # prints the same starting/ready line as a fresh launch.
       if _err_wait_health 600 "$model" 11500; then
+        _err_adopt_watchdog 11500
         _err_note_last_model "$model"
         return 0
       fi
@@ -1422,7 +1541,26 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         ;;
     esac
 
-    # 7. tools the model manager needs
+    # 7. the idle watchdog on :11500. A server with no reaper holds its
+    # weights until `err stop` or a reboot — exactly the "why is my Mac out of
+    # memory an hour after I closed that tab" report. Doctor does not create a
+    # model, but it does adopt an err-owned one whose watchdog is missing.
+    local wport=11500 wpid
+    wpid=$(lsof -iTCP:"$wport" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+    local idle_min; idle_min=$(_err_conf_get idle_timeout_minutes); idle_min=${idle_min:-10}
+    if [[ -z "$wpid" ]]; then
+      row ok watchdog "no server on :$wport — nothing to guard"
+    elif _err_has_watchdog "$wpid"; then
+      row ok watchdog ":$wport guarded (idle ${idle_min}m)"
+    elif [[ -e "$state_dir/mlx_heartbeat-$wport" ]]; then
+      _err_arm_watchdog "$wport" "$wpid"
+      row ok watchdog ":$wport re-armed (idle ${idle_min}m)"
+    else
+      row warn watchdog ":$wport has no watchdog (not started by err)" "err run <model> to own it"
+      (( warnings++ ))
+    fi
+
+    # 8. tools the model manager needs
     local -a missing=(); local t
     for t in uv uvx mlx_vlm.server; do
       command -v "$t" >/dev/null 2>&1 || missing+=( "$t" )
@@ -1434,7 +1572,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       row ok tools "uv, uvx, mlx_vlm.server"
     fi
 
-    # 8. disk
+    # 9. disk
     local apc_kb cap_gb total_gb
     local apc_dir="${APC_DISK_PATH:-$state_dir/apc}"
     apc_kb=$(du -sk "$apc_dir" 2>/dev/null | awk '{print $1}'); apc_kb=${apc_kb:-0}
@@ -1447,7 +1585,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       row ok disk "prefix cache ${total_gb} GiB (cap ${cap_gb} GiB)"
     fi
 
-    # 9. leftovers from crashed invocations
+    # 10. leftovers from crashed invocations
     local stale; stale=$(ls -1 "$state_dir"/run/*(N) 2>/dev/null | wc -l | tr -d ' ')
     if (( stale > 50 )); then
       row warn temp "$stale scratch files in $state_dir/run" "rm -f $state_dir/run/*"
@@ -1649,6 +1787,79 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     return 0
   }
 
+  # ── update ──────────────────────────────────────────────────────
+  # err update — bring err's own source up to date, then re-run the installer
+  # so tools, hook and ~/.zshrc wiring land where a fresh install would put
+  # them. State and config are never touched: they live in $state_dir, and the
+  # shipped err.conf only ever seeds a missing file.
+  _err_headless_update() {
+    local dir="$_ERR_SRC_DIR" before after
+    if (( $# )); then
+      case "$1" in
+        -h|--help) print "usage: err update"; return 0 ;;
+        *) print -u2 "usage: err update"; return 2 ;;
+      esac
+    fi
+    before=$(<"$dir/VERSION" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -e "$dir/.git" ]]; then
+      # A git checkout belongs to whoever cloned it: fast-forward only, so
+      # local work is never merged or clobbered. A conflicting dirty tree fails
+      # here with git's own message.
+      command -v git >/dev/null 2>&1 \
+        || { print -u2 "err: git not found — update $dir by hand"; return 1; }
+      git -C "$dir" remote 2>/dev/null | grep -q . \
+        || { print -u2 "err: $dir is a git checkout with no remote"; \
+             print -u2 "     update it the way you normally do, then: sh \"$dir/install.sh\""; \
+             return 1; }
+      local branch
+      branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
+      _err_say "updating the git checkout (${branch:-detached}) in $dir"
+      if ! git -C "$dir" pull --ff-only; then
+        print -u2 "err: git pull failed in $dir"
+        print -u2 "     commit or stash local changes, then re-run: err update"
+        return 1
+      fi
+      # Idempotent: skips what is present, so this only repairs what a new
+      # release needs (a new tool, a moved hook).
+      sh "$dir/install.sh" || return 1
+    else
+      # A managed (curl) install has no git history. install.sh already knows
+      # how to refresh its own snapshot in place, so run it the way the curl
+      # one-liner does — pointed at the existing directory so nothing moves.
+      # Downloaded to a file first: a piped curl failure is invisible to a
+      # POSIX shell, and an empty script exits 0.
+      # Scratch stays in the state dir (never a fixed /tmp path): err's own
+      # rule for per-invocation files, and the run dir is already swept.
+      mkdir -p "$state_dir/run" 2>/dev/null
+      local tmp
+      tmp=$(mktemp "$state_dir/run/update.XXXXXX") || return 1
+      _err_say "updating the managed install in $dir"
+      if ! curl -fsSL --max-time 120 \
+          "https://raw.githubusercontent.com/pavsefcik/err/main/install.sh" -o "$tmp"; then
+        rm -f "$tmp"
+        print -u2 "err: could not download install.sh — check your network and re-run: err update"
+        return 1
+      fi
+      if ! ERR_DIR="$dir" sh "$tmp"; then
+        rm -f "$tmp"
+        print -u2 "err: update failed — re-run: err update"
+        return 1
+      fi
+      rm -f "$tmp"
+    fi
+
+    after=$(<"$dir/VERSION" 2>/dev/null | tr -d '[:space:]')
+    if [[ "$after" != "$before" ]]; then
+      # This shell still holds the old launcher in memory; say so instead of
+      # letting a stale dispatch surprise them later.
+      _err_say "err $before -> $after — open a new terminal (or run: reload)"
+    else
+      _err_say "err ${after:-?} is up to date"
+    fi
+    return 0
+  }
+
   # `err config` — the one file, opened in your editor. No submenus.
   # err reset [-y] — put the shipped err.conf back. The file being replaced is
   # kept as err.conf.bak, so a hand-tuned value is one copy away.
@@ -1710,6 +1921,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "err config|edit the config file"
     print -r -- "err reset|restore the shipped config"
     print -r -- "err cleanup|clear cached state"
+    print -r -- "err update|update err to the latest release"
     print -r -- "err record|show the last recorded command and output"
     print -r -- "err uninstall|remove err"
     print -r -- "err doctor|check the install"
@@ -1919,6 +2131,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       download)   _err_headless_download "$@" ;;
       version)    print "$(<"$_ERR_SRC_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')" ;;
       cleanup)    _err_headless_cleanup "$@" ;;
+      update)     _err_headless_update  "$@" ;;
       # Hidden: the launcher's bare `err` / `-h` entry point.
       helpmenu)   _err_help_menu        "$@" ;;
       -h|--help)  _err_help_menu ;;

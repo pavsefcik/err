@@ -192,6 +192,7 @@ contains "err wtf" "$_out" "the wtf row is shown (typed, not picked)"
 contains "err help" "$_out" "the help row is shown (typed, not picked)"
 contains "err run <model>" "$_out" "the menu offers err run"
 contains "err cleanup" "$_out" "the menu offers err cleanup"
+contains "err update" "$_out" "the menu offers err update"
 contains "err record" "$_out" "the menu offers err record"
 contains "err config" "$_out" "the menu offers err config"
 not_contains "err settings" "$_out" "err settings is gone (one config file)"
@@ -264,6 +265,128 @@ contains "err wtf" "$_out" "the wtf row is shown but not pickable"
 contains "err help" "$_out" "the help row is shown but not pickable"
 not_contains "err chat" "$_out" "the chat row is gone"
 not_contains "err tui" "$_out" "the tui row is gone"
+
+# ── watchdog wiring ───────────────────────────────────────────────────
+# `_err_arm_watchdog` existed for a release with no call site, so every `err
+# run` model outlived its usefulness (one served for 25 hours). A real
+# `err run` needs weights and :11500, so the guard is the call site itself: the
+# engine's launch path must still arm it.
+print "watchdog"
+if grep -q '_err_arm_watchdog "$port" "$pid"' "$REPO/err-models.zsh"; then
+  ok "the MLX launch path arms the idle watchdog"
+else
+  fail "the MLX launch path arms the idle watchdog" \
+       "no _err_arm_watchdog call in the launch path"
+fi
+_out=$(zsh "$REPO/err-models.zsh" doctor 2>&1)
+if print -r -- "$_out" | grep -qE '^  (ok|warn|fail) +watchdog '; then
+  ok "doctor reports the idle watchdog"
+else
+  fail "doctor reports the idle watchdog" "$(print -r -- "$_out" | grep -c .) lines"
+fi
+
+# ── run flags ─────────────────────────────────────────────────────────
+# `--idle` / `--keep` are launch options, not model ids. A bad spec must stop
+# at the parser instead of being handed to the downloader.
+print "run flags"
+_out=$(engine_rows dump run --idle nonsense 2>&1); rc=$?
+check "2" "$rc" "a bad --idle is a usage error"
+contains "usage: err run" "$_out" "the usage line names --idle"
+_out=$(engine_rows dump run --help 2>&1); rc=$?
+check "0" "$rc" "err run --help is not a model id"
+contains "usage: err run" "$_out" "--help prints the usage line"
+# A dead HF endpoint makes a parsing regression fail fast instead of reaching
+# for the network.
+_out=$({ no_servers; HF_ENDPOINT="http://127.0.0.1:9" engine_rows dump run --keep } 2>&1)
+contains "err run $FAKE_MODEL" "$_out" "--keep is a flag, not a model id"
+not_contains "--keep" "$_out" "the flag is consumed, not echoed as a model"
+
+# ── err update ────────────────────────────────────────────────────────
+# `update` edits err's own source, so every test runs against a throwaway copy
+# of the install tree with git/curl/sh stubbed. Nothing here may touch the real
+# checkout, ~/.zshrc, or the network.
+print "update"
+_UPD="$_TMP/upd"
+mkdir -p "$_UPD/lib" "$_UPD/bin" "$_UPD/home"
+# Canonical path: the engine resolves $_ERR_SRC_DIR with ${0:A:h}, which turns
+# /var/... into /private/var/... — the recorded argv must match that spelling.
+_UPD="${_UPD:A}"
+cp "$REPO/err-models.zsh" "$REPO/err.py" "$REPO/VERSION" "$REPO/err.conf" \
+   "$REPO/err-curator.md" "$REPO/install.sh" "$_UPD/"
+cp "$REPO"/lib/*.zsh "$REPO"/lib/*.py "$_UPD/lib/" 2>/dev/null
+
+# The engine refuses to run headless without these; stub them so the test does
+# not depend on the host having uv/mlx-vlm installed.
+for _t in uvx mlx_vlm.server curl; do
+  printf '#!/bin/sh\nexit 0\n' > "$_UPD/bin/$_t"
+done
+# git records its argv, reports a remote/branch, and "pulls" a new VERSION.
+cat > "$_UPD/bin/git" <<EOF
+#!/bin/sh
+echo "git \$*" >> "$_UPD/calls"
+case "\$*" in
+  *remote*)    echo origin ;;
+  *rev-parse*) echo main ;;
+  *pull*)      echo 0.999.0 > "$_UPD/VERSION" ;;
+esac
+exit 0
+EOF
+# sh records what the installer was asked to run (and where it lives).
+cat > "$_UPD/bin/sh" <<EOF
+#!/bin/sh
+echo "sh \$* ERR_DIR=\${ERR_DIR:-}" >> "$_UPD/calls"
+exit 0
+EOF
+chmod +x "$_UPD/bin"/*
+
+_upd() { # run the copied engine with the stubs in front of PATH
+  # HOME too: the engine's legacy migration rewrites the launcher line in
+  # ~/.zshrc, and a test copy of the tree must never repoint the real shell.
+  : >| "$_UPD/calls"
+  HOME="$_UPD/home" PATH="$_UPD/bin:$PATH" \
+    zsh "$_UPD/err-models.zsh" "$@" 2>&1
+}
+
+# git checkout: fast-forward only, then the installer, then the version line.
+mkdir -p "$_UPD/.git"
+_out=$(_upd update)
+_calls=$(<"$_UPD/calls")
+contains "git -C $_UPD remote" "$_calls" "update asks the checkout for a remote"
+contains "git -C $_UPD pull --ff-only" "$_calls" "update fast-forwards the git checkout"
+contains "sh $_UPD/install.sh" "$_calls" "update re-runs the installer"
+contains "err $(<"$REPO/VERSION") -> 0.999.0" "$_out" "update reports the version change"
+contains "open a new terminal" "$_out" "update says the shell holds old code"
+
+# Managed (curl) install: no git history, so install.sh refreshes the snapshot
+# in place, pointed at the existing directory.
+rm -rf "$_UPD/.git"
+cp "$REPO/VERSION" "$_UPD/VERSION"
+cat > "$_UPD/bin/curl" <<'EOF'
+#!/bin/sh
+# -o <file>: pretend the installer was downloaded
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac
+done
+echo '#!/bin/sh' > "$out"
+exit 0
+EOF
+chmod +x "$_UPD/bin/curl"
+_out=$(_upd update)
+_calls=$(<"$_UPD/calls")
+not_contains "pull --ff-only" "$_calls" "a managed install never runs git"
+contains "ERR_DIR=$_UPD" "$_calls" "install.sh is pointed at the existing install"
+contains "is up to date" "$_out" "an unchanged version says so"
+
+# A failed download must fail loudly, not report success.
+cat > "$_UPD/bin/curl" <<'EOF'
+#!/bin/sh
+exit 22
+EOF
+chmod +x "$_UPD/bin/curl"
+_out=$(_upd update); rc=$?
+check "1" "$rc" "a failed download fails update"
+contains "could not download install.sh" "$_out" "a failed download says so"
+not_contains "is up to date" "$_out" "a failed download is not reported as up to date"
 
 # ── cancel must abort, not fall through ───────────────────────────────
 print "cancel"

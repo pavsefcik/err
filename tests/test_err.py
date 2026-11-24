@@ -723,14 +723,26 @@ def main():
             "ERR_WATCHDOG_POLL": "0.2",
         })
 
-        def arm(pid, port=None):
+        def arm(pid, port=None, idle=None, env_extra=None):
             args = [sys.executable, ERR_PY, "--watchdog", str(pid)]
             if port is not None:
-                args.append(str(port))
+                args += ["--port", str(port)]
+            if idle is not None:
+                args += ["--idle", str(idle)]
+            env = dict(wd_env)
+            env.update(env_extra or {})
             return subprocess.run(
-                args, cwd=REPO, env=wd_env, capture_output=True, text=True,
+                args, cwd=REPO, env=env, capture_output=True, text=True,
                 timeout=30,
             )
+
+        def wait_gone(proc, seconds=8.0):
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    return True
+                time.sleep(0.2)
+            return proc.poll() is not None
 
         idle = subprocess.Popen(["/bin/sleep", "120"])
         try:
@@ -780,6 +792,93 @@ def main():
                 worker.kill()
             worker.wait()
         ok("idle watchdog spares a server that is burning CPU")
+
+        # A per-launch override (`err run --idle 45m`) beats err.conf: here it
+        # RAISES the limit above the 3 s in the test conf, so the server must
+        # outlive a window in which the conf alone would have reaped it.
+        override = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            check(arm(override.pid, idle=5).returncode == 0,
+                  "arming with --idle failed")
+            time.sleep(5.0)                    # > conf (3 s) + one poll
+            check(override.poll() is None,
+                  "a per-launch --idle override was ignored")
+        finally:
+            if override.poll() is None:
+                override.kill()
+            override.wait()
+        ok("a per-launch --idle override beats err.conf")
+
+        kept = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            check(arm(kept.pid, idle=0).returncode == 0,
+                  "arming with --idle 0 failed")
+            time.sleep(2.0)                    # > 3x the conf timeout
+            check(kept.poll() is None, "idle 0 did not mean 'never stop'")
+        finally:
+            if kept.poll() is None:
+                kept.kill()
+            kept.wait()
+        ok("--idle 0 / --keep never reaps")
+
+        # A connection that has just appeared buys the socket grace; a pooled
+        # keep-alive socket that has been open past it does NOT, or one client
+        # holding a connection open would pin a model forever.
+        import socket as _socket
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 11598))
+        listener.listen(1)
+        client = _socket.create_connection(("127.0.0.1", 11598))
+        peer, _ = listener.accept()
+        pooled = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            check(arm(pooled.pid, 11598, env_extra={
+                "ERR_SOCKET_GRACE": "0.2"}).returncode == 0,
+                  "arming a keep-alive watchdog failed")
+            check(wait_gone(pooled),
+                  "a pooled keep-alive connection kept an idle server alive")
+        finally:
+            if pooled.poll() is None:
+                pooled.kill()
+            pooled.wait()
+            for sock in (client, peer, listener):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        ok("a pooled keep-alive connection does not pin a model")
+
+        # Memory pressure drops the idle limit to idle_timeout_pressure_minutes:
+        # weights are the first thing worth giving back when the Mac starts
+        # swapping.
+        pressured = subprocess.Popen(["/bin/sleep", "120"])
+        try:
+            # --idle 5 would never reap inside the window; the pressure limit
+            # (3 s) must win over both the conf and the launch override.
+            check(arm(pressured.pid, idle=5,
+                      env_extra={"ERR_MEMORY_PRESSURE": "1",
+                                 "ERR_IDLE_PRESSURE_MIN": "0.05"}
+                      ).returncode == 0,
+                  "arming a pressure watchdog failed")
+            check(wait_gone(pressured),
+                  "memory pressure did not shorten the idle timeout")
+        finally:
+            if pressured.poll() is None:
+                pressured.kill()
+            pressured.wait()
+        ok("memory pressure reaps an idle server early")
+
+        # Every reap leaves a breadcrumb: a model that disappears must not look
+        # like a crash.
+        log_path = os.path.join(wd, "logs", "watchdog.log")
+        text = ""
+        if os.path.isfile(log_path):
+            with open(log_path) as f:
+                text = f.read()
+        check("stopped" in text and "memory pressure" in text,
+              "the reaper left no breadcrumb in logs/watchdog.log: " + text)
+        ok("a reap is logged to logs/watchdog.log")
 
         print(f"\nALL {len(passed)} TESTS PASSED")
         return 0

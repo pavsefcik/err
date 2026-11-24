@@ -26,7 +26,8 @@ curl -fsSL https://raw.githubusercontent.com/pavsefcik/err/main/install.sh | sh
 There is no checkout to keep around: the installer unpacks the latest release
 into `~/.err` (`ERR_DIR` to override) and runs itself from there, so the
 launcher, engine and config stay together in one directory. Re-running the same
-line repairs and updates that directory.
+line repairs and updates that directory; `err update` is that re-run, from
+inside the shell.
 
 From a checkout, `sh install.sh` installs in place instead:
 
@@ -74,6 +75,7 @@ Available commands:
        err config             edit the config file
        err reset              restore the shipped config (old one kept as .bak)
        err cleanup            clear cached state
+       err update             update err to the latest release
        err record             show the last command and output
        err uninstall          remove err
        err doctor             check the install
@@ -179,6 +181,24 @@ err owns the full local-model lifecycle:
   The prefix cache (`apc/`) is bounded in total (`apc_total_gb`) and expires
   entries untouched for `apc_max_age_days` (default 7) on every launch and stop;
   mlx-vlm's own `APC_DISK_MAX_GB` only caps each model directory separately.
+- `err run --idle 45m` · `--keep` — how long a model may sit unused. Every
+  server err starts is detached (so the next `err` call, pi or an app on
+  `:11500` finds it already loaded) and carries an idle watchdog: a request,
+  generation (the server's CPU) or a *new* connection keeps it alive, and after
+  `idle_timeout_minutes` (default 10) of none it is stopped. A client that
+  holds a keep-alive socket open is not "using" it — that socket counts only for
+  `idle_socket_grace_seconds` (default 60). Under macOS memory pressure the
+  limit drops to `idle_timeout_pressure_minutes` (default 1), because the
+  weights are the first thing worth giving back. `--idle <minutes|1h>` overrides
+  the timeout for one launch, `--keep` arms no watchdog at all, and every reap
+  is logged to `logs/watchdog.log` — `err doctor` shows the watchdog state of a
+  running server and re-arms an err-owned one that lost it.
+- `err update` — update err itself, then re-run the installer so tools, hook and
+  `~/.zshrc` wiring match the new code. A git checkout is fast-forwarded
+  (`git pull --ff-only`, never a merge or a clobbered dirty tree); a managed
+  curl install refreshes its own `~/.err` snapshot in place. State, config and
+  weights are untouched. The shell that ran it still holds the old launcher, so
+  err says to open a new terminal (or run `reload`) when the version changed.
 ### The Apple model is a model choice too
 
 The on-device Apple Foundation Model appears in the same menus as `apple-fm`:
