@@ -97,6 +97,9 @@ def main():
     def session_file(session_id):
         return os.path.join(tmp, "sessions", f"{session_id}.json")
 
+    def draft_file(session_id):
+        return os.path.join(tmp, "drafts", f"{session_id}.json")
+
     passed = []
 
     def ok(name):
@@ -125,6 +128,10 @@ def main():
         )
         check(errmod.single_line("first\nsecond\r\nthird") == "first second third",
               "line breaks collapse to one space")
+        check(errmod.quoted_title("hi") == "'hi'",
+              "a plain resume title must still be quoted")
+        check(errmod.quoted_title("it's") == "'it'\\''s'",
+              "an apostrophe in a resume title is not shell-quoted")
         check(errmod.session_question({
             "q": "Context — the command I just ran:\nCommand: ls\nExit code: 0\n"
                  "\nQuestion: what is this?"
@@ -144,10 +151,30 @@ def main():
             })
         replay = resume_buf.getvalue()
         check("resumed: a session" in replay, "resume replay names the session")
-        check("> first question?" in replay and "first answer" in replay,
+        check("err // first question?" in replay and "first answer" in replay,
               "resume replay restores the first turn")
-        check("> second question?" in replay and "Context —" not in replay,
+        check("err // second question?" in replay and "Context —" not in replay,
               "resume replay strips the context block from ask turns")
+        # The human and the model must not share a voice: `err //` for the
+        # question, `arr //` for the answer, in different colours on a terminal.
+        check("arr // first answer" in replay,
+              "resume replay lost the model's arr // voice")
+        class _Tty(io.StringIO):
+            def isatty(self):
+                return True
+        no_color = os.environ.pop("NO_COLOR", None)
+        try:
+            tty = _Tty()
+            with contextlib.redirect_stdout(tty):
+                asked = errmod.question_prefix()
+                answered = errmod.answer_prefix()
+        finally:
+            if no_color is not None:
+                os.environ["NO_COLOR"] = no_color
+        check(asked.startswith("\033[1;36merr //") and
+              answered.startswith("\033[1;38;5;214marr //"),
+              "err // and arr // do not have distinct colours: "
+              f"{asked!r} vs {answered!r}")
         # A suggestion is pasted into an interactive zsh: `!` outside single
         # quotes must never reach the history file raw.
         check(errmod.zsh_safe_command('echo "Greetings from macOS zsh!"')
@@ -245,7 +272,8 @@ def main():
             int(read(tokens_file).strip()) == 42,
             "usage total not written to _ERR_TOKENS_FILE",
         )
-        sess = json.loads(read(session_file(sid)))
+        # One answer is a draft (see SESSION_MIN_TURNS), not a saved session.
+        sess = json.loads(read(draft_file(sid)))
         check(len(sess["turns"]) == 1, "explain turn not persisted")
         ok("explain mode messages + usage tokens")
 
@@ -405,16 +433,19 @@ def main():
         check(proc.returncode == 0, f"resume failed: {proc.stderr}")
         rows = [line for line in proc.stdout.splitlines() if line.strip()]
         check(bool(rows), "resume printed no rows")
-        # A row is a command: `err resume 1  <age>  <tty>  <cwd>  <title>`.
-        check(rows[0].strip().startswith("err resume 1 "),
+        # A row is `err resume 1  <age>  '<title>'` — the tty and cwd are
+        # stored but not shown.
+        check(rows[0].strip().startswith("err resume 1  "),
               f"resume row malformed: {rows[0]!r}")
-        check("resume 1" in proc.stdout and "ls -la" in proc.stdout,
-              "resume row does not carry the session title")
-        check(REPO in rows[0], "resume row missing cwd")
+        check("resume 1" in proc.stdout and "'ls -la'" in rows[0],
+              f"resume row does not carry the quoted title: {rows[0]!r}")
+        check("ttys" not in rows[0] and REPO not in rows[0],
+              f"resume row still carries tty/cwd: {rows[0]!r}")
 
         # A title with a raw line break (multi-line question, older session
         # file) must not split the row: `err resume` prints one row per session.
         broken_sid = str(uuid.uuid4())
+        os.makedirs(os.path.join(tmp, "sessions"), exist_ok=True)
         with open(session_file(broken_sid), "w") as f:
             json.dump({
                 "id": broken_sid,
@@ -422,7 +453,7 @@ def main():
                 "tty": "ttys001",
                 "cwd": REPO,
                 "title": "first line\nsecond line",
-                "turns": [],
+                "turns": [{"q": "one", "a": "1"}, {"q": "two", "a": "2"}],
             }, f)
         proc = run(["resume"])
         check(proc.returncode == 0, f"resume with a multi-line title failed: {proc.stderr}")
@@ -431,6 +462,65 @@ def main():
         check("first line\nsecond line" not in proc.stdout,
               "resume printed a raw line break inside a title")
         ok("resume listing")
+
+        # ── Esc cancels the resume picker without dumping the list ───
+        # The picker erases its frame; printing the rows afterwards is what
+        # leaves the whole history hanging in the console.
+        import select
+        import pty
+        env = os.environ.copy()
+        env.update(base_env)
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execve(sys.executable, [sys.executable, ERR_PY, "resume"], env)
+        time.sleep(1.0)
+        # Drain what the picker painted before the key, then everything the
+        # cancel writes. The frame legitimately contains the rows; the bytes
+        # written *after* Esc must not.
+        painted = b""
+        while select.select([master], [], [], 0.05)[0]:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            painted += data
+        os.write(master, b"\x1b")
+        after = b""
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            after += data
+        os.close(master)
+        _, cancel_status = os.waitpid(pid, 0)
+        checked_paint = painted.decode("utf-8", "replace")
+        cancelled = after.decode("utf-8", "replace")
+        check("err resume 1" in checked_paint,
+              "the resume picker did not open on a terminal")
+        check("err resume 1" not in cancelled,
+              "Esc left the session list hanging in the console")
+        check(os.WIFEXITED(cancel_status) and os.WEXITSTATUS(cancel_status) == 0,
+              f"Esc did not cancel cleanly: {cancel_status!r}")
+        ok("Esc cancels the resume list")
+
+        # ── picker rows fit the terminal ─────────────────────────────
+        # The picker moves the cursor up by the number of lines it painted, so
+        # a row wider than the window (a long session title on a narrow
+        # terminal) wraps, the count no longer matches, and the frame smears.
+        check(errmod.fit_columns("abcdef", 4) == "abcd",
+              "fit_columns does not truncate to the window width")
+        check(errmod.fit_columns("abcdef", 6) == "abcdef",
+              "fit_columns drops text that already fits")
+        check(errmod.fit_columns("ab日本cd", 6) == "ab日本",
+              "fit_columns does not count wide characters as two columns")
+        check(errmod.fit_columns("abc", 0) == "",
+              "fit_columns returns text for a zero-width window")
+        ok("picker rows fit the terminal width")
 
         # ── token estimate when the server omits usage ───────────────
         state.usage_total = None
@@ -453,13 +543,12 @@ def main():
         new_id = content.strip()
         check("\n" not in new_id, "session id file has more than one line")
         uuid.UUID(new_id)  # raises if not a uuid
-        check(os.path.isfile(session_file(new_id)), "new session file not created")
+        # An untouched session is not saved at all: no (untitled) resume row.
+        check(not os.path.isfile(session_file(new_id)),
+              "new created an empty session file")
         check(read(turns_file).strip() == "0", "new did not publish 0 turns")
         check(read(tokens_file).strip() == "0", "new did not publish 0 tokens")
         check("new session" in proc.stdout, "new did not confirm the reset")
-        with open(session_file(new_id)) as f:
-            fresh = json.load(f)
-        check(fresh.get("turns") == [], "new session started with turns")
         # And it must really be empty on the next ask: no history from `sid`.
         state.reply = "Fresh start."
         proc = run(["--ask", "anything"], {"_ERR_SESSION_ID": new_id})
@@ -469,7 +558,26 @@ def main():
               f"ask after new carried history: {msgs}")
         check(read(turns_file).strip() == "1", "ask did not publish 1 turn")
         check(read(tokens_file).strip() != "0", "ask did not publish its tokens")
-        ok("new writes _ERR_SESSION_ID_FILE")
+        # One answer is a draft: readable by the next question, not resumable.
+        check(not os.path.isfile(session_file(new_id)),
+              "a one-answer session became a saved session")
+        check(os.path.isfile(draft_file(new_id)), "a one-answer session has no draft")
+        # The second answer promotes it: it is now a real session.
+        state.reply = "Second answer."
+        proc = run(["--ask", "and again?"], {"_ERR_SESSION_ID": new_id})
+        check(proc.returncode == 0, f"second ask failed: {proc.stderr}")
+        msgs = state.requests[-1].get("messages", [])
+        check([m.get("role") for m in msgs] == ["system", "user", "assistant", "user"],
+              f"second ask lost the first answer: {msgs}")
+        check(os.path.isfile(session_file(new_id)),
+              "a two-answer session was not saved")
+        check(not os.path.isfile(draft_file(new_id)),
+              "a promoted session left its draft behind")
+        with open(session_file(new_id)) as f:
+            fresh = json.load(f)
+        check(len(fresh.get("turns") or []) == 2,
+              "the saved session does not hold both answers")
+        ok("sessions are saved from the second answer")
 
         # `err stop` calls this: mint a session silently and reset both files.
         reset_file = os.path.join(tmp, "reset_session_id")
@@ -510,7 +618,7 @@ def main():
         secret = "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         proc = run([], extra={"_ERR_LAST_CMD": secret, "_ERR_LAST_EXIT": "0"})
         check(proc.returncode == 0, f"explain with a secret failed: {proc.stderr}")
-        with open(session_file(sid)) as f:
+        with open(draft_file(sid)) as f:
             data = json.load(f)
         check("ghp_" not in data.get("title", ""), "session title leaked a secret")
         check("ghp_" not in json.dumps(data), "session file leaked a secret")

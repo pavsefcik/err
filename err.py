@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -110,6 +111,10 @@ FUNC_BODY_LIMIT = 300
 
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 SESSION_MAX_COUNT = 50
+# A session only becomes a saved, resumable session once it has this many
+# answers. Below that it is a draft: still on disk so the next question keeps
+# its history, but never offered by `err resume` and never counted as a session.
+SESSION_MIN_TURNS = 2
 SUGGEST_BYTE_LIMIT = 400
 
 # ── help ────────────────────────────────────────────────────────────
@@ -184,14 +189,29 @@ class Spinner:
 # tests get plain text.
 ANSWER_PREFIX = "arr // "
 _ANSWER_ACCENT = "\033[1;38;5;214m"
+# The human's voice in a replayed conversation. Cyan is the prompt colour, so
+# `err //` reads as input while the model's `arr //` stays amber; the two must
+# never be mistaken for each other when `err resume` rebuilds a session.
+QUESTION_PREFIX = "err // "
+_QUESTION_ACCENT = "\033[1;36m"
 _RESET = "\033[0m"
+
+
+def _prefix(text: str, accent: str) -> str:
+    """Colour an introducer only when stdout is a terminal."""
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    return accent + text.rstrip() + _RESET + " "
 
 
 def answer_prefix() -> str:
     """The `arr // ` introducer, coloured only when stdout is a terminal."""
-    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
-        return ANSWER_PREFIX
-    return _ANSWER_ACCENT + ANSWER_PREFIX.rstrip() + _RESET + " "
+    return _prefix(ANSWER_PREFIX, _ANSWER_ACCENT)
+
+
+def question_prefix() -> str:
+    """The `err // ` introducer for the human's turns in a replay."""
+    return _prefix(QUESTION_PREFIX, _QUESTION_ACCENT)
 
 
 def mlx_ready(base_url: str) -> bool:
@@ -671,14 +691,21 @@ def sessions_dir() -> str:
     return os.path.join(state_dir(), "sessions")
 
 
-def ensure_sessions_dir() -> str:
-    d = sessions_dir()
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    return d
+def drafts_dir() -> str:
+    """Where a not-yet-resumable session lives (see SESSION_MIN_TURNS).
+
+    Kept apart from `sessions/` so `err resume`, `prune_sessions` and
+    `err delete` never mistake a one-answer conversation for a saved session.
+    """
+    return os.path.join(state_dir(), "drafts")
 
 
 def session_path(sid: str) -> str:
     return os.path.join(sessions_dir(), f"{sid}.json")
+
+
+def draft_path(sid: str) -> str:
+    return os.path.join(drafts_dir(), f"{sid}.json")
 
 
 def valid_session_id(sid: str) -> bool:
@@ -728,28 +755,29 @@ def current_tty() -> str:
 
 
 def load_session(sid: str):
-    try:
-        with open(session_path(sid)) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    data.setdefault("id", sid)
-    data.setdefault("created_at", 0)
-    data.setdefault("last_used", 0)
-    data.setdefault("pid", 0)
-    data.setdefault("tty", "?")
-    data.setdefault("cwd", "")
-    data.setdefault("title", "")
-    data.setdefault("turns", [])
-    data.setdefault("tokens", 0)
-    return data
+    for path in (session_path(sid), draft_path(sid)):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        data.setdefault("id", sid)
+        data.setdefault("created_at", 0)
+        data.setdefault("last_used", 0)
+        data.setdefault("pid", 0)
+        data.setdefault("tty", "?")
+        data.setdefault("cwd", "")
+        data.setdefault("title", "")
+        data.setdefault("turns", [])
+        data.setdefault("tokens", 0)
+        return data
+    return None
 
 
-def save_session(sess: dict) -> None:
-    ensure_sessions_dir()
-    path = session_path(sess["id"])
+def _write_session_file(path: str, sess: dict) -> None:
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     payload = json.dumps(sess, ensure_ascii=False)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -760,6 +788,35 @@ def save_session(sess: dict) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+
+def _remove_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def save_session(sess: dict) -> None:
+    """Persist a session, or keep it as a draft until it is worth resuming.
+
+    A one-answer conversation must still be readable by the next question
+    (that is what makes `err wtf` followed by `err and why?` work), so it is
+    written to `drafts/`. It becomes a real session file only at
+    SESSION_MIN_TURNS answers; before that, `err resume` never lists it.
+    """
+    sid = sess["id"]
+    turns = sess.get("turns") or []
+    if len(turns) >= SESSION_MIN_TURNS:
+        _write_session_file(session_path(sid), sess)
+        _remove_file(draft_path(sid))
+        return
+    # Not resumable yet: no live session file may claim otherwise.
+    _remove_file(session_path(sid))
+    if turns:
+        _write_session_file(draft_path(sid), sess)
+    else:
+        _remove_file(draft_path(sid))
 
 
 def session_files() -> list:
@@ -779,31 +836,61 @@ def load_all_sessions() -> list:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(data, dict):
-            sessions.append(data)
+        if not isinstance(data, dict):
+            continue
+        # A live file from an older err may still hold a short conversation;
+        # like a draft, it is not something `err resume` should offer.
+        if len(data.get("turns") or []) < SESSION_MIN_TURNS:
+            continue
+        sessions.append(data)
     return sessions
 
 
 def prune_sessions() -> None:
-    """Drop sessions older than 7 days or beyond the 50 newest, oldest first."""
+    """Drop short, old or excess sessions; drafts are aged out too."""
     entries = []
     for path in session_files():
         try:
             with open(path) as f:
                 data = json.load(f)
             last_used = _safe_int(data.get("last_used", 0))
+            turns = len(data.get("turns") or [])
         except (OSError, json.JSONDecodeError, AttributeError):
             last_used = 0
+            turns = 0
+        # Clean up pre-draft leftovers (`err resume` already hides these).
+        if turns < SESSION_MIN_TURNS:
+            _remove_file(path)
+            continue
         entries.append((path, last_used))
     entries.sort(key=lambda item: item[1], reverse=True)
     now = int(time.time())
     for index, (path, last_used) in enumerate(entries):
         expired = last_used <= 0 or now - last_used > SESSION_MAX_AGE
         if index >= SESSION_MAX_COUNT or expired:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            _remove_file(path)
+    # Drafts exist only to carry one conversation's first turn to the next
+    # question; the same age/count bounds keep one dead shell from leaking one.
+    try:
+        names = os.listdir(drafts_dir())
+    except OSError:
+        names = []
+    drafts = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(drafts_dir(), name)
+        try:
+            with open(path) as f:
+                last_used = _safe_int(json.load(f).get("last_used", 0))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            last_used = 0
+        drafts.append((path, last_used))
+    drafts.sort(key=lambda item: item[1], reverse=True)
+    for index, (path, last_used) in enumerate(drafts):
+        expired = last_used <= 0 or now - last_used > SESSION_MAX_AGE
+        if index >= SESSION_MAX_COUNT or expired:
+            _remove_file(path)
 
 
 def write_counter_file(env_name: str, total: int) -> None:
@@ -886,6 +973,15 @@ def single_line(text: str) -> str:
     a row in half and the next row parses as part of the title.
     """
     return re.sub(r"[\r\n]+", " ", text or "").strip()
+
+
+def quoted_title(title: str) -> str:
+    """Always single-quote a resume title, even when it needs no quoting.
+
+    `shlex.quote` leaves a plain word bare, but the menu wants a visible
+    boundary around the title: `err resume 1  5m  'hi'`.
+    """
+    return "'" + title.replace("'", "'\\''") + "'"
 
 
 def _session_title(user_content: str, command: str) -> str:
@@ -1448,6 +1544,11 @@ def emit_session_id(sid: str) -> None:
 
 def cmd_new(quiet: bool = False) -> None:
     sid = str(uuid.uuid4())
+    # The shell is leaving its previous conversation: a one-answer draft for it
+    # has no future and should not wait for the prune pass.
+    previous = os.environ.get("_ERR_SESSION_ID", "").strip()
+    if previous and previous != sid and valid_session_id(previous):
+        _remove_file(draft_path(previous))
     sess = default_session(sid)
     save_session(sess)
     publish_session_state(sess)
@@ -1485,6 +1586,32 @@ def human_age(seconds: int) -> str:
     return f"{seconds // 86400}d"
 
 
+def fit_columns(text: str, width: int) -> str:
+    """Cut text to at most `width` terminal columns.
+
+    The picker counts the lines it paints to move the cursor back on the next
+    frame. A row wider than the window wraps onto a second physical line, the
+    count stops matching, and on a narrow terminal the menu smears instead of
+    clearing. Wide East-Asian characters take two columns, combining marks none.
+    """
+    if width <= 0:
+        return ""
+    out = []
+    used = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            width_ch = 0
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            width_ch = 2
+        else:
+            width_ch = 1
+        if used + width_ch > width:
+            break
+        out.append(ch)
+        used += width_ch
+    return "".join(out)
+
+
 def pick_row(rows: list) -> int:
     """Arrow-key picker with err's look; returns the index, or -1 to cancel.
 
@@ -1514,8 +1641,10 @@ def pick_row(rows: list) -> int:
         lines, columns = 24, 80
     if lines < 8:
         lines = 24
-    if columns < 40:
-        columns = 80
+    # Never inflate a narrow window to 80: rows are truncated below, but at 80
+    # columns each line would wrap and the repaint count would be wrong.
+    if columns < 20:
+        columns = 20
 
     footer = "←↓↑→ navigate • esc return • enter submit"
     vis = max(3, min(len(rows), lines - 4))
@@ -1527,12 +1656,15 @@ def pick_row(rows: list) -> int:
 
     def paint():
         nonlocal drawn, nlines
+        # 7-column prefix, one spare column: each painted line is one row.
+        room = max(1, columns - 8)
         out = []
         for index in range(scroll, min(scroll + vis, len(rows))):
+            text = fit_columns(rows[index], room)
             if index == cursor:
-                out.append("\x1b[1;36marr // " + rows[index] + "\x1b[0m")
+                out.append("\x1b[1;36marr // " + text + "\x1b[0m")
             else:
-                out.append("       " + rows[index])
+                out.append("       " + text)
         out.append("")
         out.append("\x1b[2m" + footer[:max(0, columns - 1)] + "\x1b[0m")
         if drawn:
@@ -1641,7 +1773,7 @@ def replay_session(sess: dict) -> None:
         question = session_question(turn)
         answer = (turn.get("a") or "").strip()
         if question:
-            print("       > " + question)
+            print(question_prefix() + question)
         if answer:
             print(answer_prefix() + answer)
 
@@ -1658,17 +1790,19 @@ def cmd_resume(args: list) -> None:
         rows = []
         for index, sess in enumerate(sessions, 1):
             age = human_age(now - _safe_int(sess.get("last_used", 0)))
-            tty = single_line(sess.get("tty") or "?") or "?"
-            cwd = single_line(sess.get("cwd") or "?") or "?"
             title = single_line(sess.get("title") or "") or "(untitled)"
-            # The row stays a command: `err resume 3` is what you would type,
-            # the rest is the label that makes the number meaningful.
-            rows.append(f"err resume {index}  {age:>4}  {tty}  {cwd}  {title}")
+            # The row stays a command: `err resume 3` is what you would type.
+            # tty and cwd are still stored, but they are noise in the menu;
+            # only the age and the quoted title help you tell sessions apart.
+            rows.append(f"err resume {index}  {age}  {quoted_title(title)}")
         picked = pick_row(rows)
         if picked < 0:
-            # No terminal, or cancelled: the list itself is the answer.
-            for row in rows:
-                print(row)
+            # Off a terminal (a pipe, a script) the list itself is the answer.
+            # On one, Esc is a plain cancel: the picker already erased its
+            # frame, so printing the rows would leave the history hanging.
+            if not (sys.stdin.isatty() and sys.stderr.isatty()):
+                for row in rows:
+                    print(row)
             return
         args = [str(picked + 1)]
 

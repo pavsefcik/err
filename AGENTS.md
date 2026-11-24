@@ -35,7 +35,7 @@ repo template, opened by `err config`). Thinking is its first line.
 State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
 marv harness** — never write err's state there; the launcher's one-time migration
 only *reads* it. It holds
-`err.conf`, `sessions/`, `logs/`, `apc/`, `run/` (per-shell scratch),
+`err.conf`, `sessions/`, `drafts/` (a session with <2 answers), `logs/`, `apc/`, `run/` (per-shell scratch),
 `last-model` (the default model), `err-curator.md` (the curated catalog). Weights
 live in the HF hub cache, never there.
 

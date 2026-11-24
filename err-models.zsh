@@ -720,12 +720,18 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     fi
 
     local n=${#rows[@]} cursor=0 scroll=0 drawn=0 nlines=0
-    local term_lines width
-    read -r term_lines width <<< "$(_err_term_size)"
-    # vis rows + one footer line must fit, or the repaint scrolls the screen.
-    local vis=$(( term_lines - 4 ))   # rows + blank + footer must fit
-    (( vis < 3 )) && vis=3
-    (( vis > n )) && vis=n
+    local term_lines width vis
+    # Re-read the size on every paint: a resize while the menu is open would
+    # otherwise leave a stale width, and a row wider than the window wraps.
+    # The repaint moves up by the logical line count, so one wrapped row makes
+    # the whole frame smear instead of clearing.
+    _pick_size() {
+      read -r term_lines width <<< "$(_err_term_size)"
+      # vis rows + one footer line must fit, or the repaint scrolls the screen.
+      vis=$(( term_lines - 4 ))   # rows + blank + footer must fit
+      (( vis < 3 )) && vis=3
+      (( vis > n )) && vis=n
+    }
     typeset -A marked=()
 
     _pick_scroll() {
@@ -747,6 +753,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
       print -u2 -n -- $'\e[?25h'
     }
     _pick_render() {
+      _pick_size
+      _pick_scroll
       print -u2 -n -- $'\e[?25l'
       (( drawn )) && print -u2 -n -- "\033[${nlines}A\033[J"
       local -a out=()
@@ -765,10 +773,16 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         # the typed-only rows). Keep one blank line before the pickable rows.
         [[ "$header" == *$'\n'* ]] && out+=( '' )
       fi
+      # Every painted line must occupy exactly one terminal row, or nlines no
+      # longer matches what is on screen. Rows carry a 7-column prefix
+      # (`arr // ` / the multi-select marker), so leave that plus one spare.
+      local room=$(( width - 8 ))
+      (( room < 1 )) && room=1
       local end=$(( scroll + vis )) i text pref
       (( end > n )) && end=n
       for (( i=scroll; i<end; i++ )); do
         text="${rows[$((i+1))]}"
+        text="${text:0:$room}"
         if (( i == cursor )); then
           (( multi && ${marked[$((i+1))]:-0} )) \
             && out+=( $'\e[1;32marr // '"$text"$'\e[0m' ) \
@@ -877,7 +891,9 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     [[ "$lines" == <-> ]] || lines=${LINES:-24}
     [[ "$cols" == <-> ]] || cols=${COLUMNS:-80}
     (( lines < 8 )) && lines=24
-    (( cols < 40 )) && cols=80
+    # Do not inflate a narrow window to 80: the picker truncates rows, but at
+    # 80 columns every line would wrap and the frame would fall apart.
+    (( cols < 20 )) && cols=20
     print -r -- "$lines $cols"
   }
 

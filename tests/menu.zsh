@@ -231,6 +231,29 @@ _out="${_out##*\^D}"          # the literal caret-D `script` leaves behind
 [[ "$_out" =~ '([a-zA-Z0-9_-]+)' ]] && _out="$match[1]"
 check "info" "$_out" "a picked row reports its verb"
 
+# A narrow terminal must truncate rows, not let them wrap. A wrapped line is
+# two physical lines, but the repaint moves up by the logical count, so the
+# frame smears into the rows above it. A stub stty reports 40 columns.
+mkdir -p "$_TMP/narrow"
+cat > "$_TMP/narrow/stty" <<'EOF'
+#!/bin/sh
+echo "24 40"
+EOF
+chmod +x "$_TMP/narrow/stty"
+_out=$( (sleep 1; printf 'j'; sleep 0.2; printf '\r') \
+  | script -q /dev/null env ERR_PICK_DUMP= PATH="$_TMP/narrow:$PATH" \
+      zsh "$REPO/err-models.zsh" helpmenu 2>/dev/null \
+  | tr -d '\r' | sed -E $'s/\\x1b\\[[0-9;?]*[A-Za-z]//g' )
+_long=$(print -r -- "$_out" | grep -E '^(arr //|       )' \
+  | awk 'length($0) > 40 {print length($0)}' | sort -n | tail -1)
+if [[ -z "$_long" ]]; then
+  ok "a narrow window truncates rows instead of wrapping them"
+else
+  fail "a narrow window truncates rows instead of wrapping them" \
+       "a painted line was $_long columns wide"
+fi
+
+
 # A piped `err` must print the rows, never drive a picker loop.
 _out=$(zsh "$REPO/err-models.zsh" helpmenu 2>&1)
 contains "err new" "$_out" "a non-tty help prints the rows"

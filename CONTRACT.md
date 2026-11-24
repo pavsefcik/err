@@ -199,7 +199,14 @@ suggest        = ask | history | off (what to do with the recommended command)
 
 ## Session file
 
-`$ERR_STATE_DIR/sessions/<uuid>.json`, mode `600`.
+A saved session is `$ERR_STATE_DIR/sessions/<uuid>.json`, mode `600`. It is
+written only once it has at least **two answers** (`turns`). A conversation
+with zero or one answer lives in `$ERR_STATE_DIR/drafts/<uuid>.json` instead
+(same shape, mode `600`): the next question still reads it for history, but
+`err resume` never lists it. The second answer promotes it to `sessions/` and
+removes the draft; `err new` / `err clear` remove both. Files in `sessions/`
+with fewer than two turns (from older err versions) are hidden from
+`err resume` and deleted by the prune pass.
 
 ```json
 {"id":"…","created_at":0,"last_used":0,"pid":0,"tty":"…","cwd":"…",
@@ -214,10 +221,18 @@ suggest        = ask | history | off (what to do with the recommended command)
   turns.) The title is redacted like every other persisted field.
 * `turns` — written **only** after a redaction pass (`[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=`,
   `ghp_…`, `sk-…`, `Bearer …` → `«redacted»`).
+* `err resume` lists sessions as `err resume <n>  <age>  '<title>'` (the row is
+  the command you would type). `tty` and `cwd` stay in the file but are not
+  shown: the quoted title is what tells two sessions apart. On a terminal, Esc
+  cancels silently after erasing the menu; off a terminal the rows are printed
+  for scripts.
 * `err resume` rebuilds the conversation on screen after a successful pick: it
   prints the title and the last `history_turns` turns (the same window the next
-  request carries). Only a TTY gets the replay; piped output stays silent.
-* Pruned: > 7 days old or > 50 sessions, oldest first.
+  request carries). The human's turns carry `err // ` in cyan and the model's
+  answers `arr // ` in amber, so the two voices never blur together. Only a TTY
+  gets the replay; piped output stays silent (and uncoloured).
+* Pruned: > 7 days old or > 50 sessions, oldest first (drafts follow the
+  same bounds, so a dead shell cannot leak one).
 
 Exit codes: `0` ok, `1` runtime failure, `2` usage error. Data on stdout,
 diagnostics on stderr — the engine and err.py must stay pipe-friendly.
