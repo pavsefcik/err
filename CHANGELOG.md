@@ -30,6 +30,22 @@ All notable changes to err are documented here. Format follows
   `err doctor` shows the watchdog state of a running server and re-arms an
   err-owned server that lost it.
 
+### Changed
+
+- **The curated catalog drops the 2-bit models.** The two `Ternary-Bonsai-*`
+  2-bit entries were a nice experiment and a bad default: fast, but weak at
+  following err's prompts, which is the one thing a shell explainer needs. The
+  list is now two 4-bit picks and nothing else — `Qwen3.5-4B-MLX-4bit` for 8 GB,
+  `Qwen3.5-9B-MLX-4bit` for 16 GB. Both are `qwen` in `_err_model_family`, so
+  err still forces `--enable-thinking 0` for them.
+- **The curated model list is release data, not a live feed.** `err` used to
+  refresh its cached `err-curator.md` from `main` on GitHub once an hour, so two
+  machines on the same version could offer different downloads and the list
+  changed without a review step. The bundled file now wins unconditionally: the
+  cache is reseeded when the shipped catalog changes (a new version, or a
+  `git pull` of the checkout), detected against the `.seed` snapshot. There is no
+  default upstream URL; `ERR_CATALOG_URL` remains as an explicit opt-in.
+
 ### Fixed
 
 - **The MLX idle watchdog was never armed.** `_err_arm_watchdog` existed, was

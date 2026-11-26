@@ -76,9 +76,8 @@ Available commands:
        err reset              restore the shipped config (old one kept as .bak)
        err cleanup            clear cached state
        err update             update err to the latest release
-       err record             show the last command and output
-       err uninstall          remove err
        err doctor             check the install
+       err uninstall          remove err
 ```
 
 `err`, `err -h` and `err help` open the same interactive menu: arrow to a
@@ -97,8 +96,8 @@ question that starts with one needs quoting: `err 'why did that fail?'`.
 
 After a command, `err wtf` explains what it did — and, if it failed, why.
 `err <question>` answers technical or non-technical questions, with follow-ups
-kept in context by `err new` and `err resume`. `err record` shows the last
-command and captured output without contacting the model.
+kept in context by `err new` and `err resume`. `err record` (typed, not on the
+menu) shows the last command and captured output without contacting the model.
 
 **Output reaches the model from PTY capture.** Set `capture = pty` in `err config`
 and open a new terminal shell. Commands keep a real TTY while err records the
@@ -161,17 +160,20 @@ err owns the full local-model lifecycle:
 
 - `err list` — installed models. On a terminal it opens a look-only list: one
   `arr //` cursor you can move, selecting does nothing. Piped output stays bare
-  ids for scripts.
+  ids for scripts. `apple-fm` (the on-device Apple model) is the last entry; it
+  is not a download, so it never appears as one.
 - `err download` / `err remove` — fetch from the HuggingFace Hub (curated list or
   a typed repo id), or delete from disk. Models already on disk are not offered
-  for download. `apple-fm` cannot be removed.
+  for download. `apple-fm` cannot be removed. The curated list is bundled with
+  the release (`err-curator.md`) and changes only when err itself does; a
+  `ERR_CATALOG_URL` opts into refreshing it from the network.
 - `err run <model>` / `err swap <model>` — start a model on `:11500`, or replace
   the one running there. `err run` with no model reports
   `arr // <model> already running` when one is serving. One model at a time:
   there is no default to set, the model you last ran is the one err answers from.
 - `err info` — the three values an OpenAI client needs: model, base URL
   (`http://localhost:11500/v1`) and API key (`none`), or the same
-  `arr // nothing is running — start one with 'err run <model>'` line as
+  `arr // nothing is running — start one with 'err run'` line as
   `err swap`.
 - `err stop` — stop what err started. It also ends the conversation: a fresh
   session is prepared for the next start (the turn/token counter goes back to 0).
@@ -204,7 +206,7 @@ err owns the full local-model lifecycle:
 The on-device Apple Foundation Model appears in the same menus as `apple-fm`:
 
 ```
-err run          # err run apple-fm  (Apple on-device) is one of the choices
+err run          # err run apple-fm (Apple on-device) is one of the choices
 err stop apple-fm
 ```
 

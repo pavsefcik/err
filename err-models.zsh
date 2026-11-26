@@ -83,21 +83,21 @@ _err_engine_main() {
 
   mkdir -p "$state_dir" "$log_dir"
 
-  # The curated download list ships bundled in this repo (`err-curator.md`), but
-  # upstream can add models between releases, so an interactive startup refreshes
-  # a cached copy from GitHub (`_err_catalog_sync`: TTL-gated, ~5s timeout,
-  # offline keeps what we have). The cache sits at the legacy path sibling tools
-  # read (`~/.cache/err/err-curator.md`) and is what the Download menu and
-  # `err download` serve. A `ERR_CATALOG` override points at a different
-  # list and disables the refresh; ERR_CATALOG_TTL (seconds, 0 = every run,
-  # `never` = off) and ERR_CATALOG_URL tune it.
+  # The curated download list is release data: it ships bundled in this repo
+  # (`err-curator.md`) and is reseeded when that file changes (a new version),
+  # so every install on a version offers the same models. No upstream fetch:
+  # `main` between releases is unreviewed and would make two machines on the
+  # same version disagree. The cache sits at the legacy path sibling tools read
+  # (`~/.cache/err/err-curator.md`) and is what the Download menu and
+  # `err download` serve. `ERR_CATALOG` points at a different list; setting
+  # ERR_CATALOG_URL opts into a network refresh, ERR_CATALOG_TTL (seconds,
+  # 0 = every run, `never` = off) tunes it.
   local curated_file="${ERR_CATALOG:-}"
   if [[ -z "$curated_file" ]]; then
     # Never fetch on a headless verb: `err run` sits on pi's model_select
     # path and must stay fast. Seeding from the bundled copy still happens, so
-    # headless verbs read the same (last fetched) list as `err download`.
-    local catalog_url=""
-    (( $# == 0 )) && catalog_url="${ERR_CATALOG_URL:-$_ERR_CATALOG_URL_DEFAULT}"
+    # headless verbs read the same (last released) list as `err download`.
+    local catalog_url="${ERR_CATALOG_URL:-$_ERR_CATALOG_URL_DEFAULT}"
     if _err_catalog_sync "$_ERR_SRC_DIR/err-curator.md" \
          "$state_dir/err-curator.md" "$catalog_url" "${ERR_CATALOG_TTL:-3600}"; then
       curated_file="$state_dir/err-curator.md"
@@ -661,7 +661,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
 
   _err_note_last_model() { [[ -n "${1:-}" ]] && print -r -- "$1" > "$state_dir/last-model" }
 
-  _ERR_FM_LABEL="apple-fm  (Apple on-device)"
+  _ERR_FM_LABEL="apple-fm (Apple on-device)"
 
   # One config file: $ERR_STATE_DIR/err.conf (ERR_CONF overrides the path),
   # seeded from the repo template on first run. Flat `key = value`, read by
@@ -1232,7 +1232,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # There is nothing to swap *from* when nothing is running: starting the
     # first model is `err run`.
     if [[ -z "$(_err_running_model)" ]]; then
-      _err_say "nothing is running — start one with 'err run <model>'"
+      _err_say "nothing is running — start one with 'err run'"
       return 1
     fi
     if (( _ERR_RUN_HELP )); then
@@ -1362,6 +1362,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     if (( ! ${#want} )); then
       local -a ids=( ${(f)"$(_err_headless_list)"} )
       ids=( ${ids:#} )
+      # apple-fm ships with macOS: it is on the list, never removable.
+      ids=( ${ids:#$_ERR_FM_ID} )
       if (( ! ${#ids} )); then print "err: nothing installed"; return 0; fi
       local picked
       local id row
@@ -1667,6 +1669,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # `err info` / `err run` / `err swap`.
     local -a ids=( ${(f)"$(_err_installed_ids $all)"} )
     ids=( ${ids:#} )
+    # The on-device Apple model is not an MLX repo, so it never shows up in the
+    # hub scan above. It is still a model you can run, so it ends the list —
+    # only where `fm` actually exists (no dead row on older macOS).
+    _err_fm_supported && ids+=( "$_ERR_FM_ID" )
     if (( json )); then
       print -n '['
       local first=1 id
@@ -1922,9 +1928,8 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     print -r -- "err reset|restore the shipped config"
     print -r -- "err cleanup|clear cached state"
     print -r -- "err update|update err to the latest release"
-    print -r -- "err record|show the last recorded command and output"
-    print -r -- "err uninstall|remove err"
     print -r -- "err doctor|check the install"
+    print -r -- "err uninstall|remove err"
   }
 
   # The part of the menu that is not pickable: commands you only type. They sit
@@ -2037,7 +2042,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # Read-only: never starts anything. Nothing running is a valid answer.
     if [[ -z "$(_err_running_model)" ]]; then
       (( json )) && { print 'null'; return 1; }
-      _err_say "nothing is running — start one with 'err run <model>'"
+      _err_say "nothing is running — start one with 'err run'"
       return 1
     fi
     local pid port model

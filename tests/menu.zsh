@@ -139,8 +139,8 @@ fi
 # Both verbs must say the same thing when there is nothing to show.
 _swap="$({ no_servers; engine_rows dump swap } 2>&1)"
 _info="$({ no_servers; engine_rows dump info } 2>&1)"
-contains "nothing is running — start one with 'err run <model>'" "$_swap" "err swap names the next step"
-contains "nothing is running — start one with 'err run <model>'" "$_info" "err info uses the same text as err swap"
+contains "nothing is running — start one with 'err run'" "$_swap" "err swap names the next step"
+contains "nothing is running — start one with 'err run'" "$_info" "err info uses the same text as err swap"
 # `err list` on a terminal is a look-only picker: the cursor moves, nothing
 # is chosen. Off a terminal it stays bare ids for scripts.
 _out=$(engine_pty dump list 2>&1)
@@ -148,6 +148,14 @@ contains "$FAKE_MODEL" "$_out" "err list opens the look-only cursor on a termina
 not_contains "err info" "$_out" "err list does not open a menu"
 _out=$(engine_rows dump list 2>&1)
 not_contains "arr //" "$_out" "a piped err list stays bare ids"
+if fm_available; then
+  # The on-device model is not a hub repo, so the scan cannot find it: `err
+  # list` appends it, last, and only where `fm` exists.
+  _last=$(print -r -- "$_out" | grep -v '^$' | tail -n1)
+  check "apple-fm" "$_last" "err list ends with apple-fm"
+fi
+_out=$({ PATH="$_TMP/macos26:$_TMP/bin:$PATH"; engine_rows dump list } 2>&1)
+not_contains "apple-fm" "$_out" "err list hides apple-fm on macOS 26"
 
 print "remove excludes the Apple model"
 _out=$(engine_rows dump remove 2>&1)
@@ -193,7 +201,15 @@ contains "err help" "$_out" "the help row is shown (typed, not picked)"
 contains "err run <model>" "$_out" "the menu offers err run"
 contains "err cleanup" "$_out" "the menu offers err cleanup"
 contains "err update" "$_out" "the menu offers err update"
-contains "err record" "$_out" "the menu offers err record"
+not_contains "err record" "$_out" "err record is typed, no longer a menu row"
+# Doctor explains what uninstall removes, so it comes first.
+_doctor_ln=$(print -r -- "$_out" | grep -n 'err doctor' | head -1 | cut -d: -f1)
+_uninst_ln=$(print -r -- "$_out" | grep -n 'err uninstall' | head -1 | cut -d: -f1)
+if [[ -n "$_doctor_ln" && -n "$_uninst_ln" ]] && (( _doctor_ln < _uninst_ln )); then
+  ok "err doctor sits in front of err uninstall"
+else
+  fail "err doctor sits in front of err uninstall" "doctor=$_doctor_ln uninstall=$_uninst_ln"
+fi
 contains "err config" "$_out" "the menu offers err config"
 not_contains "err settings" "$_out" "err settings is gone (one config file)"
 not_contains "err status" "$_out" "err status folded into info"

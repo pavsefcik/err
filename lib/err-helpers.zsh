@@ -163,10 +163,15 @@ _err_usage() {
   print "  err uninstall"
 }
 
-# Upstream of the bundled curated catalog. `main` is the live list, so an
-# interactive startup can pick up models added between releases;
-# ERR_CATALOG_URL overrides it and an empty value disables the refresh.
-_ERR_CATALOG_URL_DEFAULT="https://raw.githubusercontent.com/pavsefcik/err/main/err-curator.md"
+# The curated catalog moves with releases, not with the wall clock: the list a
+# machine serves is the one bundled in its err version (`err-curator.md`), so
+# every install answers from the same, reviewed set of models. `err update` (or
+# a `git pull`) changes the bundled file, `_err_catalog_sync` notices it differs
+# from the `.seed` snapshot and reseeds the cache. There is deliberately no
+# default upstream URL: `main` between releases is unreviewed and would make two
+# machines on the same version offer different downloads. ERR_CATALOG_URL is
+# the opt-in escape hatch (and an empty value, the norm, means no network).
+_ERR_CATALOG_URL_DEFAULT=""
 
 # Is $1 a usable curated catalog? Shape check only: at least one line that STARTS
 # with a model id (`org/name`, optionally '#'-commented or followed by a tagline),
@@ -198,14 +203,15 @@ _err_catalog_stale() {
 #   $3 upstream URL (empty = no network)
 #   $4 refresh TTL in seconds (default 3600)
 #
-# Precedence: a NEW bundled catalog wins — a release ships knowledge even
-# offline, detected against a `.seed` snapshot of what the cache was seeded
-# from. It also stamps the attempt, so the freshly bundled list is served for one
-# TTL before upstream can supersede it (upstream lags a push, and a local catalog
-# edit must not vanish under the next fetch). Otherwise the cache is refreshed
-# from upstream at most once per TTL. A failed fetch never discards a good cache,
-# and it still stamps the attempt so an offline machine pays the timeout at most
-# once per TTL. Returns 0 when the cache file is usable; prints nothing.
+# Precedence: the bundled catalog wins — it is the list that shipped with this
+# err version, and that is the only thing that should change it. Detected
+# against a `.seed` snapshot of what the cache was seeded from, so a release
+# (or a git pull) reseeds the cache even offline; the stamp makes the freshly
+# bundled list survive the TTL before an opt-in ERR_CATALOG_URL can supersede
+# it. Otherwise the cache is refreshed from that URL at most once per TTL. A
+# failed fetch never discards a good cache, and it still stamps the attempt so
+# an offline machine pays the timeout at most once per TTL. Returns 0 when the
+# cache file is usable; prints nothing.
 _err_catalog_sync() {
   local bundled="$1" cache="$2" url="$3" ttl="${4:-3600}"
   local seed="$cache.seed" stamp="$cache.fetched" tmp
