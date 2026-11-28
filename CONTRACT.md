@@ -1,4 +1,4 @@
-# err v0.603.0 — internal contract
+# err v0.603.0-rc1 — internal contract
 
 Single source of truth for the seams between the three layers. Read before editing
 `err-launcher.zsh`, `err.py`, or `err-models.zsh`.
@@ -22,7 +22,7 @@ Single source of truth for the seams between the three layers. Read before editi
 | `err-models.zsh` | ported marv-mlx engine, run as a subprocess | `zsh err-models.zsh <verb> [args]` |
 | `lib/err-helpers.zsh` | engine helpers (sourced by `err-models.zsh` only) | `_err_*` |
 | `$ERR_STATE_DIR/err.conf` | the one config (seeded from the repo `err.conf`; `err config` opens it) | key = value |
-| `VERSION` | `0.603.0` | |
+| `VERSION` | `0.603.0-rc1` | |
 
 `ERR_STATE_DIR` defaults to `$HOME/.cache/err`. `~/.cache/marv` is the marv
 harness's and is never written by err; a first-run migration copies err's own
@@ -218,12 +218,12 @@ suggest        = ask | history | off (what to do with the recommended command)
 ## Session file
 
 A saved session is `$ERR_STATE_DIR/sessions/<uuid>.json`, mode `600`. It is
-written only once it has at least **two answers** (`turns`). A conversation
-with zero or one answer lives in `$ERR_STATE_DIR/drafts/<uuid>.json` instead
-(same shape, mode `600`): the next question still reads it for history, but
-`err resume` never lists it. The second answer promotes it to `sessions/` and
-removes the draft; `err new` / `err clear` remove both. Files in `sessions/`
-with fewer than two turns (from older err versions) are hidden from
+written as soon as it has **one answer** (`turns`), so a session is resumable
+from its first answer. A conversation with no answer at all is never written.
+`$ERR_STATE_DIR/drafts/<uuid>.json` (same shape, mode `600`) is legacy: older
+err versions kept a one-answer conversation there, and it is still read for
+history and promoted on its next save. Nothing writes there now; the prune pass
+ages old drafts out. Empty session files from older versions are hidden from
 `err resume` and deleted by the prune pass.
 
 ```json
@@ -249,7 +249,7 @@ with fewer than two turns (from older err versions) are hidden from
   request carries). The human's turns carry `err // ` in cyan and the model's
   answers `arr // ` in amber, so the two voices never blur together. Only a TTY
   gets the replay; piped output stays silent (and uncoloured).
-* Pruned: > 7 days old or > 50 sessions, oldest first (drafts follow the
+* Pruned: > 7 days old or > 50 sessions, oldest first (legacy drafts follow the
   same bounds, so a dead shell cannot leak one).
 
 Exit codes: `0` ok, `1` runtime failure, `2` usage error. Data on stdout,

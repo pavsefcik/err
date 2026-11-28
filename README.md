@@ -56,7 +56,7 @@ err                            the menu (bare)
 err -h                         the menu as well
 err help                       the menu, typed
 
-err // 0.603.0 // local MLX LLM runner
+err // 0.603.0-rc1 // local MLX LLM runner
 
 Available commands:
        err 'question'         ask a question
@@ -215,7 +215,7 @@ its own port (`err.conf` → `port`, default `8080`) instead of `:11500`, and
 `err info` reports it. OpenAI clients and the pi extension expect `:11500`; for
 the Apple model the base URL is `http://127.0.0.1:8080/v1`.
 
-State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`err.conf`, `sessions/`, `drafts/`, logs, the prefix cache and the cached catalog). A session is saved for `err resume` from its second answer; before that its turns sit in `drafts/` so the conversation still has its history. `err config` opens the one config file; `temperature` / `max_tokens` there are shared by `err "<question>"`, and extra launch flags are repeated `server_flag = --kv-bits 8` lines. `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
+State lives in `ERR_STATE_DIR`, default `~/.cache/err` (`err.conf`, `sessions/`, logs, the prefix cache and the cached catalog; `drafts/` is legacy from older versions). A session is saved for `err resume` from its first answer. `err config` opens the one config file; `temperature` / `max_tokens` there are shared by `err "<question>"`, and extra launch flags are repeated `server_flag = --kv-bits 8` lines. `~/.cache/marv/` belongs to the marv harness and is left alone — on first run err copies its own files across from the old shared location and never touches apc/logs/venvs there.
 
 Model weights are never in err's state: they live in the HuggingFace hub cache, `~/.cache/huggingface/hub/models--<org>--<name>/`, where the model directory holds `snapshots/…` symlinks into `blobs/`. That is why a fully downloaded 4B model can show as a few MB in `du` — the weights are in `blobs/`, shared by link.
 

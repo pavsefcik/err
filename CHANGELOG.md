@@ -5,6 +5,8 @@ All notable changes to err are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.603.0-rc1] - 2026-11-28
+
 ### Added
 
 - **`err update`** — update err itself from inside the shell, listed right after
@@ -32,6 +34,11 @@ All notable changes to err are documented here. Format follows
 
 ### Changed
 
+- **A session is saved from its first answer.** One answer is now enough for
+  `err resume` to list the conversation; before, a one-answer session sat in
+  `drafts/` until a second answer promoted it. An empty conversation still
+  writes no file. `drafts/` is no longer written — old draft files are still
+  read and promoted on their next save, then pruned normally.
 - **The curated catalog drops the 2-bit models.** The two `Ternary-Bonsai-*`
   2-bit entries were a nice experiment and a bad default: fast, but weak at
   following err's prompts, which is the one thing a shell explainer needs. The
@@ -45,28 +52,6 @@ All notable changes to err are documented here. Format follows
   cache is reseeded when the shipped catalog changes (a new version, or a
   `git pull` of the checkout), detected against the `.seed` snapshot. There is no
   default upstream URL; `ERR_CATALOG_URL` remains as an explicit opt-in.
-
-### Fixed
-
-- **The MLX idle watchdog was never armed.** `_err_arm_watchdog` existed, was
-  documented as the thing that stops `:11500` models, and had no call site — an
-  `err run` model stayed in RAM until `err stop` or a reboot (one had been
-  serving for 25 hours). `_err_headless_launch` now arms it on every path
-  (`run`, `swap`, `ensure`), so `idle_timeout_minutes` means what it says.
-  `err doctor` / `ensure` adopt err-owned servers started before the fix.
-- **A keep-alive connection no longer pins a model forever.** Established
-  sockets counted as activity for as long as they existed, so one pooled client
-  could keep a server alive all night. A connection now counts only for
-  `idle_socket_grace_seconds` after it appears; CPU burn and err's own requests
-  remain the real signals.
-- **The watchdog no longer risks killing a recycled pid.** It records the
-  server's start time when armed and exits without signalling if the pid now
-  belongs to a different process.
-
-## [0.603.0] - 2026-11-23
-
-### Changed
-
 - **`apple-fm` is gated on macOS 27+.** The on-device model does not exist on
   older systems, so it is no longer shown as a row, never becomes the default,
   and `err run apple-fm` refuses with a version message. On macOS 26 and older,
@@ -90,6 +75,23 @@ All notable changes to err are documented here. Format follows
 - **Oldest supported macOS is 26 (Tahoe).** The current MLX wheels are built
   for macOS 26 on Apple Silicon; the installer already refuses older systems,
   non-Apple-Silicon hardware, and non-Darwin hosts.
+
+### Fixed
+
+- **The MLX idle watchdog was never armed.** `_err_arm_watchdog` existed, was
+  documented as the thing that stops `:11500` models, and had no call site — an
+  `err run` model stayed in RAM until `err stop` or a reboot (one had been
+  serving for 25 hours). `_err_headless_launch` now arms it on every path
+  (`run`, `swap`, `ensure`), so `idle_timeout_minutes` means what it says.
+  `err doctor` / `ensure` adopt err-owned servers started before the fix.
+- **A keep-alive connection no longer pins a model forever.** Established
+  sockets counted as activity for as long as they existed, so one pooled client
+  could keep a server alive all night. A connection now counts only for
+  `idle_socket_grace_seconds` after it appears; CPU burn and err's own requests
+  remain the real signals.
+- **The watchdog no longer risks killing a recycled pid.** It records the
+  server's start time when armed and exits without signalling if the pid now
+  belongs to a different process.
 
 ## [0.602.0] - 2026-11-22
 

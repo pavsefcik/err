@@ -272,9 +272,11 @@ def main():
             int(read(tokens_file).strip()) == 42,
             "usage total not written to _ERR_TOKENS_FILE",
         )
-        # One answer is a draft (see SESSION_MIN_TURNS), not a saved session.
-        sess = json.loads(read(draft_file(sid)))
+        # One answer is already a saved session (see SESSION_MIN_TURNS).
+        sess = json.loads(read(session_file(sid)))
         check(len(sess["turns"]) == 1, "explain turn not persisted")
+        check(not os.path.isfile(draft_file(sid)),
+              "a one-answer session was written as a draft")
         ok("explain mode messages + usage tokens")
 
         # ── ask mode + history window + fenced suggestion ────────────
@@ -558,26 +560,25 @@ def main():
               f"ask after new carried history: {msgs}")
         check(read(turns_file).strip() == "1", "ask did not publish 1 turn")
         check(read(tokens_file).strip() != "0", "ask did not publish its tokens")
-        # One answer is a draft: readable by the next question, not resumable.
-        check(not os.path.isfile(session_file(new_id)),
-              "a one-answer session became a saved session")
-        check(os.path.isfile(draft_file(new_id)), "a one-answer session has no draft")
-        # The second answer promotes it: it is now a real session.
+        # One answer is enough: it is a saved, resumable session right away.
+        check(os.path.isfile(session_file(new_id)),
+              "a one-answer session was not saved")
+        check(not os.path.isfile(draft_file(new_id)),
+              "a one-answer session left a draft behind")
+        # The second answer is appended to the same saved session.
         state.reply = "Second answer."
         proc = run(["--ask", "and again?"], {"_ERR_SESSION_ID": new_id})
         check(proc.returncode == 0, f"second ask failed: {proc.stderr}")
         msgs = state.requests[-1].get("messages", [])
         check([m.get("role") for m in msgs] == ["system", "user", "assistant", "user"],
               f"second ask lost the first answer: {msgs}")
-        check(os.path.isfile(session_file(new_id)),
-              "a two-answer session was not saved")
         check(not os.path.isfile(draft_file(new_id)),
-              "a promoted session left its draft behind")
+              "a saved session left a draft behind")
         with open(session_file(new_id)) as f:
             fresh = json.load(f)
         check(len(fresh.get("turns") or []) == 2,
               "the saved session does not hold both answers")
-        ok("sessions are saved from the second answer")
+        ok("sessions are saved from the first answer")
 
         # `err stop` calls this: mint a session silently and reset both files.
         reset_file = os.path.join(tmp, "reset_session_id")
@@ -618,7 +619,7 @@ def main():
         secret = "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         proc = run([], extra={"_ERR_LAST_CMD": secret, "_ERR_LAST_EXIT": "0"})
         check(proc.returncode == 0, f"explain with a secret failed: {proc.stderr}")
-        with open(draft_file(sid)) as f:
+        with open(session_file(sid)) as f:
             data = json.load(f)
         check("ghp_" not in data.get("title", ""), "session title leaked a secret")
         check("ghp_" not in json.dumps(data), "session file leaked a secret")

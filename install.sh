@@ -1,5 +1,5 @@
 #!/bin/sh
-# err installer — v0.603.0
+# err installer — v0.603.0-rc1
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/pavsefcik/err/main/install.sh | sh

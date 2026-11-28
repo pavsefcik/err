@@ -134,10 +134,9 @@ FUNC_BODY_LIMIT = 300
 
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 SESSION_MAX_COUNT = 50
-# A session only becomes a saved, resumable session once it has this many
-# answers. Below that it is a draft: still on disk so the next question keeps
-# its history, but never offered by `err resume` and never counted as a session.
-SESSION_MIN_TURNS = 2
+# A session is saved, and offered by `err resume`, as soon as it has this many
+# answers. An empty conversation has nothing to resume and is never written.
+SESSION_MIN_TURNS = 1
 SUGGEST_BYTE_LIMIT = 400
 
 # ── help ────────────────────────────────────────────────────────────
@@ -838,10 +837,11 @@ def sessions_dir() -> str:
 
 
 def drafts_dir() -> str:
-    """Where a not-yet-resumable session lives (see SESSION_MIN_TURNS).
+    """Legacy home for a not-yet-resumable session (older err versions).
 
-    Kept apart from `sessions/` so `err resume`, `prune_sessions` and
-    `err delete` never mistake a one-answer conversation for a saved session.
+    One-answer conversations are saved sessions now. This directory is still
+    read for those old files, and `prune_sessions` ages them out, but nothing
+    writes here any more.
     """
     return os.path.join(state_dir(), "drafts")
 
@@ -944,12 +944,12 @@ def _remove_file(path: str) -> None:
 
 
 def save_session(sess: dict) -> None:
-    """Persist a session, or keep it as a draft until it is worth resuming.
+    """Persist a session once it has an answer.
 
-    A one-answer conversation must still be readable by the next question
-    (that is what makes `err wtf` followed by `err and why?` work), so it is
-    written to `drafts/`. It becomes a real session file only at
-    SESSION_MIN_TURNS answers; before that, `err resume` never lists it.
+    One answer is enough to make a conversation worth resuming, so it goes
+    straight to `sessions/` and `err resume` lists it. An empty session leaves
+    no file at all. A legacy one-answer draft from an older err is removed on
+    its first save here, promoting that conversation.
     """
     sid = sess["id"]
     turns = sess.get("turns") or []
@@ -957,12 +957,8 @@ def save_session(sess: dict) -> None:
         _write_session_file(session_path(sid), sess)
         _remove_file(draft_path(sid))
         return
-    # Not resumable yet: no live session file may claim otherwise.
     _remove_file(session_path(sid))
-    if turns:
-        _write_session_file(draft_path(sid), sess)
-    else:
-        _remove_file(draft_path(sid))
+    _remove_file(draft_path(sid))
 
 
 def session_files() -> list:
@@ -984,8 +980,8 @@ def load_all_sessions() -> list:
             continue
         if not isinstance(data, dict):
             continue
-        # A live file from an older err may still hold a short conversation;
-        # like a draft, it is not something `err resume` should offer.
+        # A live file from an older err may still hold an empty conversation;
+        # it is not something `err resume` should offer.
         if len(data.get("turns") or []) < SESSION_MIN_TURNS:
             continue
         sessions.append(data)
@@ -993,7 +989,7 @@ def load_all_sessions() -> list:
 
 
 def prune_sessions() -> None:
-    """Drop short, old or excess sessions; drafts are aged out too."""
+    """Drop empty, old or excess sessions; legacy drafts are aged out too."""
     entries = []
     for path in session_files():
         try:
@@ -1004,7 +1000,7 @@ def prune_sessions() -> None:
         except (OSError, json.JSONDecodeError, AttributeError):
             last_used = 0
             turns = 0
-        # Clean up pre-draft leftovers (`err resume` already hides these).
+        # Clean up empty leftovers (`err resume` already hides these).
         if turns < SESSION_MIN_TURNS:
             _remove_file(path)
             continue
@@ -1015,8 +1011,8 @@ def prune_sessions() -> None:
         expired = last_used <= 0 or now - last_used > SESSION_MAX_AGE
         if index >= SESSION_MAX_COUNT or expired:
             _remove_file(path)
-    # Drafts exist only to carry one conversation's first turn to the next
-    # question; the same age/count bounds keep one dead shell from leaking one.
+    # Legacy one-answer drafts from older err are no longer written; the same
+    # age/count bounds keep one dead shell from leaking one.
     try:
         names = os.listdir(drafts_dir())
     except OSError:
@@ -1690,11 +1686,6 @@ def emit_session_id(sid: str) -> None:
 
 def cmd_new(quiet: bool = False) -> None:
     sid = str(uuid.uuid4())
-    # The shell is leaving its previous conversation: a one-answer draft for it
-    # has no future and should not wait for the prune pass.
-    previous = os.environ.get("_ERR_SESSION_ID", "").strip()
-    if previous and previous != sid and valid_session_id(previous):
-        _remove_file(draft_path(previous))
     sess = default_session(sid)
     save_session(sess)
     publish_session_state(sess)

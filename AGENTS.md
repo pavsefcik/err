@@ -11,7 +11,7 @@
    from marv-mlx, serving local MLX models behind an OpenAI-compatible endpoint
    on `:11500`.
 
-Version lives in `VERSION` (`0.603.0`). `CONTRACT.md` is the authoritative
+Version lives in `VERSION` (`0.603.0-rc1`). `CONTRACT.md` is the authoritative
 description of the seams between the three layers — read it before touching
 dispatch, env vars, or session storage.
 
@@ -35,7 +35,7 @@ repo template, opened by `err config`). Thinking is its first line.
 State: `ERR_STATE_DIR`, default `~/.cache/err`. **`~/.cache/marv` belongs to the
 marv harness** — never write err's state there; the launcher's one-time migration
 only *reads* it. It holds
-`err.conf`, `sessions/`, `drafts/` (a session with <2 answers), `logs/`, `apc/`, `run/` (per-shell scratch),
+`err.conf`, `sessions/` (a session is saved from its first answer), `logs/`, `apc/`, `run/` (per-shell scratch), `drafts/` (legacy from older versions, read and pruned only),
 `last-model` (the default model), `err-curator.md` (the curated catalog). Weights
 live in the HF hub cache, never there.
 
