@@ -578,16 +578,45 @@ def ensure_running() -> bool:
 # ── backend selection ──────────────────────────────────────────────
 
 
+FM_MODEL_IDS = ("apple-fm", "system", "pcc")
+
+
+def last_model_id() -> str:
+    """The model the user last ran or swapped to (empty if none)."""
+    try:
+        with open(os.path.join(state_dir(), "last-model")) as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
 def backend_name() -> str:
-    return (os.environ.get("ERR_BACKEND") or CFG.get("backend", "fm")).strip().lower()
+    """Which backend answers, following the model the user selected.
+
+    `last-model` is the selection (the engine writes it on every run/swap), so
+    it wins over a stale `backend` line: an apple-fm last-model must answer
+    through fm even if err.conf still says mlx, and an MLX last-model must use
+    :11500 even if the file still says fm. `backend = pcc` is the one fm flavor
+    last-model cannot express, so it survives an apple-fm selection.
+    """
+    env = (os.environ.get("ERR_BACKEND") or "").strip().lower()
+    if env:
+        return env
+    explicit_mlx = (os.environ.get("ERR_MLX_MODEL") or CFG.get("mlx_model") or "").strip()
+    if explicit_mlx:
+        return "mlx"
+    configured = (CFG.get("backend", "fm") or "fm").strip().lower()
+    selected = last_model_id()
+    if selected in FM_MODEL_IDS:
+        return "pcc" if configured == "pcc" else "fm"
+    if selected:
+        return "mlx"
+    return configured or "fm"
 
 
 def mlx_base_url() -> str:
     url = os.environ.get("ERR_BASE_URL") or CFG.get("mlx_base_url", "http://127.0.0.1:11500")
     return url.strip().rstrip("/")
-
-
-FM_MODEL_IDS = ("apple-fm", "system", "pcc")
 
 
 def _cfg_int(key: str, default: int) -> int:
@@ -615,11 +644,7 @@ def mlx_model_id() -> str:
     explicit = (os.environ.get("ERR_MLX_MODEL") or CFG.get("mlx_model") or "").strip()
     if explicit:
         return explicit
-    try:
-        with open(os.path.join(state_dir(), "last-model")) as f:
-            model = f.readline().strip()
-    except OSError:
-        return ""
+    model = last_model_id()
     return "" if model in FM_MODEL_IDS else model
 
 

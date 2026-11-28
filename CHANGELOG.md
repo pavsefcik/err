@@ -78,6 +78,17 @@ All notable changes to err are documented here. Format follows
 
 ### Fixed
 
+- **`err run apple-fm` followed by a question now uses the on-device model.**
+  The run path recorded `last-model` but never rewrote `backend`, so with a
+  stale `backend = mlx` the next question failed with "no MLX model selected"
+  while apple-fm was visibly running on `:8080`. `run` and `swap` now point the
+  backend at whatever they selected, and err.py resolves the backend from
+  `last-model` as well, so the two paths cannot disagree again.
+- **`err swap` crosses between apple-fm and MLX.** It only looked for an MLX
+  server on `:11500`, so with apple-fm serving `:8080` it said "nothing is
+  running". It now treats either backend as a swap source, excludes the serving
+  model from the picker, and stops the old server only after the new one is
+  ready — a failed load leaves the working model in place.
 - **The MLX idle watchdog was never armed.** `_err_arm_watchdog` existed, was
   documented as the thing that stops `:11500` models, and had no call site — an
   `err run` model stayed in RAM until `err stop` or a reboot (one had been

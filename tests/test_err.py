@@ -653,6 +653,57 @@ def main():
                     os.environ[k] = v
         ok("mlx model id resolution")
 
+        # The selected model decides the backend, even if err.conf is stale.
+        # `err run apple-fm` used to record last-model but leave backend=mlx,
+        # so the next question failed with "no MLX model selected" instead of
+        # using the on-device model that was already running.
+        saved_env = {k: os.environ.get(k) for k in
+                     ("ERR_STATE_DIR", "ERR_BACKEND", "ERR_MLX_MODEL")}
+        saved_cfg = dict(errmod.CFG)
+        os.environ["ERR_STATE_DIR"] = tempfile.mkdtemp(prefix="err-state-", dir=tmp)
+        os.environ.pop("ERR_BACKEND", None)
+        os.environ.pop("ERR_MLX_MODEL", None)
+
+        def select(model, backend):
+            with open(os.path.join(errmod.state_dir(), "last-model"), "w") as f:
+                f.write(model + "\n")
+            errmod.CFG["backend"] = backend
+
+        try:
+            select("apple-fm", "mlx")
+            check(errmod.backend_name() == "fm",
+                  "an apple-fm selection with backend=mlx did not use fm")
+            # And the real answer path must take the fm branch, not exit with
+            # "no MLX model selected" before it reaches the running server.
+            saved_ensure = errmod.ensure_running
+            errmod.ensure_running = lambda: True
+            try:
+                errmod.CFG["model_id"] = "system"
+                base, model = errmod.prepare_backend()
+                check(base == errmod.MLX_HOST and model == "system",
+                      "prepare_backend did not use the on-device model")
+            finally:
+                errmod.ensure_running = saved_ensure
+            select("mlx-community/Some-Model", "fm")
+            check(errmod.backend_name() == "mlx",
+                  "an MLX selection with backend=fm did not use :11500")
+            select("apple-fm", "pcc")
+            check(errmod.backend_name() == "pcc",
+                  "an apple-fm selection lost the pcc flavor")
+            os.remove(os.path.join(errmod.state_dir(), "last-model"))
+            errmod.CFG["backend"] = "mlx"
+            check(errmod.backend_name() == "mlx",
+                  "backend must stand when no model has been selected")
+        finally:
+            errmod.CFG.clear()
+            errmod.CFG.update(saved_cfg)
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        ok("backend follows the selected model")
+
         # Autostart: `err "<question>"` brings the server up itself, but must
         # never spawn a launch when the user turned it off (scripts, CI, a
         # machine where loading 6 GB of weights is not wanted).

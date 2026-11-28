@@ -184,23 +184,34 @@ polled by clients), so a read-only query can never keep a model alive.
 `apple-fm` is a sentinel id, not an HF repo: it is served by `fm serve` on
 `err.conf` → `port` (default 8080) instead of `:11500`, and needs no download.
 It is offered by `_err_pick_installed`, `_err_pick_catalog` and
-`_err_pick_default_first`, and handled explicitly by `run`, `switch`, `default`,
-`stop` and `info`. `err list` stays HF-only (machine-readable) and
-`err info --json` keeps reporting `:11500` for OpenAI clients.
+`_err_pick_default_first`, and handled explicitly by `run`, `swap`, `stop` and
+`info`. `err list` stays HF-only (machine-readable) and `err info --json` keeps
+reporting `:11500` for OpenAI clients.
 
-The default is `last-model`: the model you last ran or switched to. With no
+The default is `last-model`: the model you last ran or swapped to. With no
 `last-model`, `_err_default_model` derives it from `err.conf`: `backend = fm|pcc`
 means the Apple model. There is no `default-model` file any more.
 
-`err switch <model>` is a move: it starts the model and records it in
-`last-model` (plus `backend = mlx`), so the pick survives the shell.
+`err run`/`err swap <model>` record the model in `last-model` **and** point the
+`backend` line at it (`_err_point_backend_at`), so the shell and the explain
+layer cannot drift. err.py also resolves the backend from `last-model` on every
+question, which heals a stale line left by an older err: an `apple-fm` selection
+answers through fm even when the file still says `mlx`, and an MLX selection
+uses `:11500` even when the file says `fm`. `backend = pcc` survives an
+`apple-fm` selection because `last-model` cannot express that flavor.
+
+`err swap` is a move across both backends. `_err_current_model` sees either the
+MLX server on `:11500` or `apple-fm` on its port (with both up, `last-model`
+decides which one err would answer from), and the picker excludes that model.
+The target is started first; the other backend is stopped only after it
+succeeds, so a failed download/load never takes down the model that works.
 
 ## err.conf keys
 
 Existing keys stay. Added:
 
 ```
-backend        = fm | mlx | pcc     (managed by `err default`/`err switch`;
+backend        = fm | mlx | pcc     (managed by `err run`/`err swap`;
                                     mlx = the :11500 server)
 mlx_base_url   = http://127.0.0.1:11500
 idle_timeout_minutes = 10           (0 = never stop; --idle/--keep override)

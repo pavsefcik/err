@@ -167,8 +167,11 @@ err owns the full local-model lifecycle:
   for download. `apple-fm` cannot be removed. The curated list is bundled with
   the release (`err-curator.md`) and changes only when err itself does; a
   `ERR_CATALOG_URL` opts into refreshing it from the network.
-- `err run <model>` / `err swap <model>` — start a model on `:11500`, or replace
-  the one running there. `err run` with no model reports
+- `err run <model>` / `err swap <model>` — start a model, or replace whatever
+  is serving. The two backends are choices in the same menu: MLX models run on
+  `:11500`, the on-device `apple-fm` on `:8080`, and `err swap` crosses either
+  way. The old server is stopped only after the new one is ready, so a failed
+  load leaves the working model in place. `err run` with no model reports
   `arr // <model> already running` when one is serving. One model at a time:
   there is no default to set, the model you last ran is the one err answers from.
 - `err info` — the three values an OpenAI client needs: model, base URL

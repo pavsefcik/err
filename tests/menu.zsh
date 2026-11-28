@@ -141,6 +141,39 @@ _swap="$({ no_servers; engine_rows dump swap } 2>&1)"
 _info="$({ no_servers; engine_rows dump info } 2>&1)"
 contains "nothing is running — start one with 'err run'" "$_swap" "err swap names the next step"
 contains "nothing is running — start one with 'err run'" "$_info" "err info uses the same text as err swap"
+
+# `err swap` moves between the two backends, not only between MLX repos: an
+# apple-fm server on :8080 is something to swap *from*.
+if fm_available; then
+  mkdir -p "$_TMP/fm-serving" "$_TMP/mlx-serving"
+  cat > "$_TMP/fm-serving/lsof" <<'EOF'
+#!/bin/sh
+case "$*" in *8080*) echo 424242; exit 0;; esac
+exit 1
+EOF
+  cat > "$_TMP/fm-serving/ps" <<'EOF'
+#!/bin/sh
+[[ "$*" == *424242* ]] && echo '/usr/bin/fm serve --host 127.0.0.1 --port 8080'
+exit 0
+EOF
+  cat > "$_TMP/mlx-serving/lsof" <<'EOF'
+#!/bin/sh
+case "$*" in *11500*) echo 434343; exit 0;; esac
+exit 1
+EOF
+  cat > "$_TMP/mlx-serving/ps" <<'EOF'
+#!/bin/sh
+[[ "$*" == *434343* ]] && echo 'mlx_vlm.server --model mock-org/Fake-4bit --port 11500'
+exit 0
+EOF
+  chmod +x "$_TMP/fm-serving/lsof" "$_TMP/fm-serving/ps" \
+           "$_TMP/mlx-serving/lsof" "$_TMP/mlx-serving/ps"
+  _out=$({ PATH="$_TMP/fm-serving:$PATH"; engine_rows dump swap } 2>&1)
+  contains "err swap $FAKE_MODEL" "$_out" "err swap moves from apple-fm to an MLX model"
+  not_contains "err swap apple-fm" "$_out" "err swap does not offer the serving apple-fm"
+  _out=$({ PATH="$_TMP/mlx-serving:$PATH"; engine_rows dump swap } 2>&1)
+  contains "err swap apple-fm" "$_out" "err swap moves from an MLX model to apple-fm"
+fi
 # `err list` on a terminal is a look-only picker: the cursor moves, nothing
 # is chosen. Off a terminal it stays bare ids for scripts.
 _out=$(engine_pty dump list 2>&1)

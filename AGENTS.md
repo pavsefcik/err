@@ -146,13 +146,18 @@ so `port = 8080  # x` breaks it). Python and zsh read the same file. Repeatable
   `last-model`, so the manager and the explain layer cannot drift again.
 - **Ports are a contract.** `err run`/`err swap` own `:11500` (every client,
   including err's own `backend = mlx`, reads that). `status --json` and
-  `endpoint` were folded into `err info` / `info --json`.
-- **The chosen model must reach the explain layer.** `err default` / `err switch`
+  `endpoint` were folded into `err info` / `info --json`. `err swap` crosses
+  backends too: `_err_current_model` treats apple-fm on its port as a swap
+  source, and the target starts before the other backend is stopped.
+- **The chosen model must reach the explain layer.** `err run` / `err swap`
   record `$ERR_STATE_DIR/last-model` *and* rewrite `backend` in `err.conf`
   (`_err_point_backend_at`). Writing only the file leaves `err` answering from
   `fm` while the menu shows another model as default — that was a real bug.
   There is no `err default` any more: `last-model` *is* the default, and
-  `run`/`swap` write it.
+  `run`/`swap` write it. err.py additionally resolves the backend *from*
+  `last-model`, so a stale `backend` line cannot send an `apple-fm` selection
+  to the MLX path (its symptom was "no MLX model selected" right after
+  `err run` showed apple-fm running).
 - **Starting :11500 is err.py's job.** When `backend = mlx` and the server is
   down, err.py runs the hidden engine verb `ensure <model>` (stop every err
   server, start the chosen model) instead of printing "start it with `err run`".

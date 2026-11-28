@@ -417,6 +417,24 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     return 1
   }
 
+  # The model actually serving a backend right now: the MLX model on :11500 or
+  # apple-fm on its port. `err swap` moves between those two, not only between
+  # MLX repos. With both up, last-model is the one err would answer from.
+  _err_current_model() {  # echoes pid\tport\tmodel (or nothing)
+    local mlx fm_pid cur
+    mlx=$(_err_running_model)
+    fm_pid=$(_err_fm_running)
+    if [[ -n "$fm_pid" ]]; then
+      cur=$(_err_last_model)
+      if [[ -z "$mlx" || "$cur" == "$_ERR_FM_ID" ]]; then
+        printf '%s\t%s\t%s\n' "$fm_pid" "$(_err_fm_port)" "$_ERR_FM_ID"
+        return 0
+      fi
+    fi
+    [[ -n "$mlx" ]] && { print -r -- "$mlx"; return 0; }
+    return 1
+  }
+
   # Fast, colour-cycling launch wheel. Terminal only: a pipe/CI/test gets the
   # plain message once (from the callers) and no carriage returns.
   _err_spin_tick() {  # index message
@@ -1106,6 +1124,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         read -r rpid rport rcur <<< "$(_err_running_model)"
         _err_say "$rcur already running"
         _err_note_last_model "$rcur"
+        _err_point_backend_at "$rcur"
         return 0
       fi
       # No installed MLX model and no Apple model on this macOS: the useful
@@ -1128,8 +1147,11 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     # After the pick, not before: the Apple model is a backend, not a repo, and
     # a pick of it must never fall through to a Hugging Face download.
     if [[ "$model" == "$_ERR_FM_ID" ]]; then
-      _err_fm_start "$idle"
-      return $?
+      if _err_fm_start "$idle"; then
+        _err_point_backend_at "$_ERR_FM_ID"
+        return 0
+      fi
+      return 1
     fi
     # Fetch uncached weights before choosing a backend: the streaming-MoE
     # compatibility check reads the cached config.json, so a fresh model has to
@@ -1150,6 +1172,7 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
         _err_say "$model already running"
         _err_adopt_watchdog "$port"
         _err_note_last_model "$model"
+        _err_point_backend_at "$model"
         return 0
       fi
       _err_status_set "stopping $cur on http://127.0.0.1:$port"
@@ -1162,7 +1185,10 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     fi
     _err_headless_launch "$model" 11500 "$idle"
     local rc=$?
-    (( rc == 0 )) && _err_note_last_model "$model"
+    if (( rc == 0 )); then
+      _err_note_last_model "$model"
+      _err_point_backend_at "$model"
+    fi
     return $rc
   }
 
@@ -1222,33 +1248,42 @@ export HF_HUB_DISABLE_SHARED_BLOBS=1
     return 0
   }
 
-  # err switch [model] — stop whatever serves :11500 and start another. The
-  # model that starts is recorded in last-model, which makes it the default.
+  # err switch [model] — stop whatever is serving and start another. The move
+  # crosses backends (apple-fm on :8080 <-> an MLX model on :11500), so the old
+  # server is stopped only after the new one is ready: a failed load leaves the
+  # working model in place. The model that starts becomes last-model.
   _err_headless_switch() {
     _err_run_flags "$@" || {
       print -u2 "usage: err swap [--idle <minutes>|--keep] [model]"
       return 2
     }
-    # There is nothing to swap *from* when nothing is running: starting the
-    # first model is `err run`.
-    if [[ -z "$(_err_running_model)" ]]; then
-      _err_say "nothing is running — start one with 'err run'"
-      return 1
-    fi
     if (( _ERR_RUN_HELP )); then
       print "usage: err swap [--idle <minutes>|--keep] [model]"
       return 0
     fi
+    # There is nothing to swap *from* when neither backend is serving:
+    # starting the first model is `err run`.
+    local cur_line; cur_line=$(_err_current_model)
+    if [[ -z "$cur_line" ]]; then
+      _err_say "nothing is running — start one with 'err run'"
+      return 1
+    fi
     local model="${_ERR_RUN_ARGS[1]:-}" cur="" pid port
-    read -r pid port cur <<< "$(_err_running_model)"
+    read -r pid port cur <<< "$cur_line"
     if [[ -z "$model" ]]; then
       # The model that is already serving is not a swap target.
       model=$(_err_pick_installed "err swap" swap 1 "$cur") || return 1
     fi
     local -a fwd=()
     [[ -n "$_ERR_RUN_IDLE" ]] && fwd=( --idle "$_ERR_RUN_IDLE" )
+    # _err_headless_run points the explain layer at the model it starts. Stop
+    # the other backend only after that succeeds.
     _err_headless_run "${fwd[@]}" "$model" || return $?
-    _err_point_backend_at "$model"
+    if [[ "$model" == "$_ERR_FM_ID" ]]; then
+      _err_stop_all >/dev/null 2>&1
+    else
+      _err_fm_stop >/dev/null 2>&1
+    fi
   }
 
   # Wait until :11500 answers /v1/models. $1 = max seconds (default 600). A
